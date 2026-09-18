@@ -1,0 +1,16 @@
+# Streamlit secrets — never commit
+.streamlit/secrets.toml
+
+# Saved hedge positions (local only)
+hedge_positions.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
