@@ -15,6 +15,7 @@ Massive prices:  ZS → ¢/bu   ZM → $/ton   ZL → ¢/lb
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -78,6 +79,79 @@ def _save_positions(rows: list[dict]) -> None:
         _POSITIONS_FILE.write_text(json.dumps(rows, indent=2))
     except Exception:
         pass
+
+
+# ── Crush position persistence ────────────────────────────────────────────────
+
+_CRUSH_POS_FILE = Path(__file__).parent / "crush_position.json"
+_POS_N = 6   # months to track forward
+
+
+def _pos_month_labels(n: int = _POS_N) -> list[str]:
+    d = date.today().replace(day=1)
+    labels = []
+    for _ in range(n):
+        labels.append(d.strftime("%b '%y"))
+        # Advance one month safely
+        d = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return labels
+
+
+_CRUSH_POS_DEFAULTS: dict = {
+    "bean_opening":      0.0,
+    "bean_priced":       [0.0] * _POS_N,
+    "bean_unpriced":     [0.0] * _POS_N,
+    "crush_bu":          [0.0] * _POS_N,
+    "meal_opening_tons": 0.0,
+    "meal_sales_tons":   [0.0] * _POS_N,
+    "oil_opening_lbs":   0.0,
+    "oil_sales_lbs":     [0.0] * _POS_N,
+}
+
+
+def _load_crush_pos() -> dict:
+    try:
+        data = json.loads(_CRUSH_POS_FILE.read_text())
+        for k, v in _CRUSH_POS_DEFAULTS.items():
+            if k not in data:
+                data[k] = v
+            elif isinstance(v, list) and len(data[k]) != _POS_N:
+                data[k] = (data[k] + [0.0] * _POS_N)[:_POS_N]
+        return data
+    except Exception:
+        return {k: (list(v) if isinstance(v, list) else v)
+                for k, v in _CRUSH_POS_DEFAULTS.items()}
+
+
+def _save_crush_pos(data: dict) -> None:
+    try:
+        _CRUSH_POS_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
+def _parse_ch_report(text: str) -> dict:
+    """Extract key inventory totals from a Du Mond-style CH Basis report."""
+    result: dict = {}
+    for line in text.replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if re.match(r"TOTAL\s+STOCK", s):
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["total_stock"] = int(nums[0].replace(",", ""))
+        if "COMPANY OWNED INVENTORY" in s:
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["company_owned_inventory"] = int(nums[-1].replace(",", ""))
+        if re.match(r"UNPRICED PURCHASES", s) and "HTA" not in s:
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["unpriced_purchases"] = int(nums[0].replace(",", ""))
+        if re.match(r"BASIS POSITION\s+[\d,]", s) and "HEDGE" not in s and " BY " not in s:
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["basis_position"] = int(nums[0].replace(",", ""))
+    return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -310,11 +384,12 @@ front = aligned.iloc[0]
 # TABS
 # ═════════════════════════════════════════════════════════════════════════════
 
-tab_live, tab_seasonal, tab_curve, tab_hedge = st.tabs([
+tab_live, tab_seasonal, tab_curve, tab_hedge, tab_position = st.tabs([
     "📊  Live Summary",
     "📅  Seasonal History",
     "🌊  Crush Curve",
     "🔧  Hedge Converter",
+    "📋  Position",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1145,3 +1220,402 @@ ZL ~${adj_value_zl:,.0f} · ZM ~${adj_value_zm:,.0f}
     )
     st.plotly_chart(fig_heat, use_container_width=True,
                     config={"displaylogo": False})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — POSITION
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab_position:
+    st.markdown(f"""
+<div class="callout">
+<strong>Crush Position</strong> — Monthly supply schedule, crush plan, and meal/oil balance
+for your plant.  Opening inventory cascades month-over-month from closing.
+Meal and oil produced are calculated automatically from your crush schedule and
+extruder yield parameters set in the sidebar.
+</div>""", unsafe_allow_html=True)
+
+    # ── Load / init state ─────────────────────────────────────────────────────
+
+    if "crush_pos" not in st.session_state:
+        st.session_state["crush_pos"] = _load_crush_pos()
+
+    cp = st.session_state["crush_pos"]
+    pm_labels = _pos_month_labels()  # 6 month strings starting this month
+
+    # ── Quick import from CH Basis report ────────────────────────────────────
+
+    with st.expander("📋  Import from CH Basis Report"):
+        st.caption(
+            "Paste the full text of your CH Basis report (e.g. from Du Mond / GrainBridge). "
+            "The parser extracts Total Stock, Company Owned Inventory, Unpriced Purchases, "
+            "and total Basis Position."
+        )
+        report_text = st.text_area(
+            "Paste report text here", height=180, key="ch_report_paste",
+            placeholder="TOTAL STOCK          217,211   ...\nCOMPANY OWNED INVENTORY  200,544\n..."
+        )
+        if st.button("Auto-fill from report", key="ch_parse_btn"):
+            parsed = _parse_ch_report(report_text)
+            if parsed:
+                if "company_owned_inventory" in parsed:
+                    cp["bean_opening"] = float(parsed["company_owned_inventory"])
+                elif "total_stock" in parsed:
+                    cp["bean_opening"] = float(parsed["total_stock"])
+                st.session_state["crush_pos"] = cp
+                _save_crush_pos(cp)
+                detail = " · ".join(
+                    f"{k.replace('_', ' ').title()}: {v:,}" for k, v in parsed.items()
+                )
+                st.success(f"Parsed: {detail}")
+            else:
+                st.warning("No recognizable data found — paste the full report text.")
+
+    # ── Soybean Supply Schedule ───────────────────────────────────────────────
+
+    st.markdown('<div class="sh">Soybean Supply Schedule</div>', unsafe_allow_html=True)
+
+    _c1, _c2 = st.columns([2, 4])
+    bean_opening_val = _c1.number_input(
+        "Opening bean inventory (bu)",
+        value=float(cp.get("bean_opening", 0.0)),
+        min_value=0.0, step=1000.0, format="%.0f",
+        key="bean_opening_in",
+        help="Current on-hand inventory. From CH report: COMPANY OWNED INVENTORY",
+    )
+    cp["bean_opening"] = bean_opening_val
+    _c2.caption(
+        f"Enter your current on-hand bean inventory. "
+        f"Subsequent months' opening = prior month's closing. "
+        f"To-Arrive Priced = purchased basis contracts; Unpriced = DP/unpriced grain."
+    )
+
+    # Editable supply inputs
+    bean_input_df = pd.DataFrame({
+        "Month":                   pm_labels,
+        "To-Arrive Priced (bu)":   [float(v) for v in cp["bean_priced"]],
+        "To-Arrive Unpriced (bu)": [float(v) for v in cp["bean_unpriced"]],
+        "Crush Planned (bu)":      [float(v) for v in cp["crush_bu"]],
+    })
+
+    bean_edited = st.data_editor(
+        bean_input_df,
+        column_config={
+            "Month": st.column_config.TextColumn("Month", disabled=True, width="small"),
+            "To-Arrive Priced (bu)": st.column_config.NumberColumn(
+                "To-Arrive Priced", format="%,.0f", min_value=0.0, width="medium"),
+            "To-Arrive Unpriced (bu)": st.column_config.NumberColumn(
+                "To-Arrive Unpriced", format="%,.0f", min_value=0.0, width="medium"),
+            "Crush Planned (bu)": st.column_config.NumberColumn(
+                "Crush Planned", format="%,.0f", min_value=0.0, width="medium"),
+        },
+        hide_index=True, use_container_width=True,
+        key="bean_supply_editor", num_rows="fixed",
+    )
+
+    # Write edits back
+    cp["bean_priced"]   = bean_edited["To-Arrive Priced (bu)"].tolist()
+    cp["bean_unpriced"] = bean_edited["To-Arrive Unpriced (bu)"].tolist()
+    cp["crush_bu"]      = bean_edited["Crush Planned (bu)"].tolist()
+
+    # Cascade bean balance
+    b_opening = [0.0] * _POS_N
+    b_avail   = [0.0] * _POS_N
+    b_closing = [0.0] * _POS_N
+    b_opening[0] = bean_opening_val
+    for _i in range(_POS_N):
+        if _i > 0:
+            b_opening[_i] = b_closing[_i - 1]
+        b_avail[_i]   = b_opening[_i] + cp["bean_priced"][_i] + cp["bean_unpriced"][_i]
+        b_closing[_i] = max(0.0, b_avail[_i] - cp["crush_bu"][_i])
+
+    # Display bean balance as transposed table (months = columns)
+    bean_bal_df = pd.DataFrame({
+        "Row": ["Opening (bu)", "To-Arrive Priced (bu)", "To-Arrive Unpriced (bu)",
+                "Total Available (bu)", "Crush Planned (bu)", "Closing Inventory (bu)"],
+        **{pm_labels[_i]: [
+            f"{b_opening[_i]:,.0f}",
+            f"{cp['bean_priced'][_i]:,.0f}",
+            f"{cp['bean_unpriced'][_i]:,.0f}",
+            f"{b_avail[_i]:,.0f}",
+            f"{cp['crush_bu'][_i]:,.0f}",
+            f"{b_closing[_i]:,.0f}",
+        ] for _i in range(_POS_N)},
+    })
+
+    rows_html = ""
+    for _, row in bean_bal_df.iterrows():
+        is_closing = row["Row"].startswith("Closing")
+        is_total   = row["Row"].startswith("Total")
+        is_crush   = row["Row"].startswith("Crush")
+        style = ""
+        if is_closing:
+            style = f"font-weight:700;background:#f6f8fa;"
+        elif is_total:
+            style = f"border-top:1px solid #e5e7eb;"
+        tds = "".join(
+            f'<td style="text-align:right;{style}">{v}</td>'
+            for v in [row[lbl] for lbl in pm_labels]
+        )
+        label_color = NEG_RED if is_crush else (JPSI_BLUE if is_closing else JPSI_DARK)
+        rows_html += (
+            f'<tr>'
+            f'<td style="{style}font-weight:600;color:{label_color};">{row["Row"]}</td>'
+            f'{tds}</tr>'
+        )
+
+    hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels)
+    st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr><th>Soybean Supply</th>{hdr}</tr></thead>
+  <tbody>{rows_html}</tbody>
+</table></div>""", unsafe_allow_html=True)
+
+    # ── Crush Production ──────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Crush Production (Extruder Yields)</div>', unsafe_allow_html=True)
+
+    meal_produced = [bu * ext_meal_tons for bu in cp["crush_bu"]]  # tons
+    oil_produced  = [bu * ext_oil_lbs   for bu in cp["crush_bu"]]  # lbs
+
+    prod_rows_html = ""
+    for _lbl, _bu, _mt, _ol in zip(pm_labels, cp["crush_bu"], meal_produced, oil_produced):
+        prod_rows_html += (
+            f"<tr>"
+            f"<td style='font-weight:600;'>{_lbl}</td>"
+            f"<td style='text-align:right;'>{_bu:,.0f}</td>"
+            f"<td style='text-align:right;color:{JPSI_BLUE};'>{_mt:,.1f}</td>"
+            f"<td style='text-align:right;color:#f6821f;'>{_ol:,.0f}</td>"
+            f"<td style='text-align:right;color:#6b7280;'>{_ol/7.524:,.0f}</td>"
+            f"</tr>"
+        )
+    st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr>
+    <th>Month</th>
+    <th style="text-align:right;">Crush (bu)</th>
+    <th style="text-align:right;color:{JPSI_BLUE};">Meal Produced (tons)</th>
+    <th style="text-align:right;color:#f6821f;">Oil Produced (lbs)</th>
+    <th style="text-align:right;color:#6b7280;">Oil (approx. gal)</th>
+  </tr></thead>
+  <tbody>{prod_rows_html}</tbody>
+</table></div>
+<p style="font-size:0.81rem;color:#6b7280;margin-top:-6px;">
+Meal = crush × {ext_meal_tons:.5f} t/bu · Oil = crush × {ext_oil_lbs:.4f} lbs/bu ·
+Gal ≈ lbs ÷ 7.524 (crude soy oil density)
+</p>""", unsafe_allow_html=True)
+
+    # ── Meal Balance ──────────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Meal Balance (short tons)</div>', unsafe_allow_html=True)
+
+    _mc1, _mc2 = st.columns([2, 4])
+    meal_opening_val = _mc1.number_input(
+        "Meal opening inventory (tons)",
+        value=float(cp.get("meal_opening_tons", 0.0)),
+        min_value=0.0, step=10.0, format="%.1f",
+        key="meal_opening_in",
+        help="Current on-hand meal inventory in short tons.",
+    )
+    cp["meal_opening_tons"] = meal_opening_val
+    _mc2.caption(
+        f"Enter current meal in storage. Produced = crush × {ext_meal_tons:.5f} t/bu. "
+        f"Closing = Opening + Produced − Sales."
+    )
+
+    meal_sales_df = pd.DataFrame({
+        "Month":              pm_labels,
+        "Meal Sales (tons)":  [float(v) for v in cp["meal_sales_tons"]],
+    })
+    meal_edited = st.data_editor(
+        meal_sales_df,
+        column_config={
+            "Month": st.column_config.TextColumn("Month", disabled=True, width="small"),
+            "Meal Sales (tons)": st.column_config.NumberColumn(
+                "Sales (tons)", format="%,.1f", min_value=0.0),
+        },
+        hide_index=True, use_container_width=True,
+        key="meal_sales_editor", num_rows="fixed",
+    )
+    cp["meal_sales_tons"] = meal_edited["Meal Sales (tons)"].tolist()
+
+    # Cascade meal balance
+    m_opening = [0.0] * _POS_N
+    m_closing = [0.0] * _POS_N
+    m_opening[0] = meal_opening_val
+    for _i in range(_POS_N):
+        if _i > 0:
+            m_opening[_i] = m_closing[_i - 1]
+        m_closing[_i] = max(0.0, m_opening[_i] + meal_produced[_i] - cp["meal_sales_tons"][_i])
+
+    # Meal balance table
+    meal_bal_rows = [
+        ("Opening (tons)",    m_opening,            JPSI_DARK, ""),
+        ("Produced (tons)",   meal_produced,         JPSI_BLUE, ""),
+        ("Sales (tons)",      cp["meal_sales_tons"], NEG_RED,   ""),
+        ("Closing (tons)",    m_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+    ]
+    meal_rows_html = ""
+    for lbl, vals, color, extra_style in meal_bal_rows:
+        tds = "".join(
+            f'<td style="text-align:right;{extra_style}">{v:,.1f}</td>'
+            for v in vals
+        )
+        meal_rows_html += (
+            f'<tr><td style="{extra_style}font-weight:600;color:{color};">{lbl}</td>{tds}</tr>'
+        )
+    st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr><th>Meal Balance</th>{hdr}</tr></thead>
+  <tbody>{meal_rows_html}</tbody>
+</table></div>""", unsafe_allow_html=True)
+
+    # ── Oil Balance ───────────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Oil Balance (lbs)</div>', unsafe_allow_html=True)
+
+    _oc1, _oc2 = st.columns([2, 4])
+    oil_opening_val = _oc1.number_input(
+        "Oil opening inventory (lbs)",
+        value=float(cp.get("oil_opening_lbs", 0.0)),
+        min_value=0.0, step=1000.0, format="%.0f",
+        key="oil_opening_in",
+        help="Current on-hand oil inventory in lbs.",
+    )
+    cp["oil_opening_lbs"] = oil_opening_val
+    _oc2.caption(
+        f"Enter current oil in storage. Produced = crush × {ext_oil_lbs:.4f} lbs/bu. "
+        f"Closing = Opening + Produced − Sales."
+    )
+
+    oil_sales_df = pd.DataFrame({
+        "Month":            pm_labels,
+        "Oil Sales (lbs)":  [float(v) for v in cp["oil_sales_lbs"]],
+    })
+    oil_edited = st.data_editor(
+        oil_sales_df,
+        column_config={
+            "Month": st.column_config.TextColumn("Month", disabled=True, width="small"),
+            "Oil Sales (lbs)": st.column_config.NumberColumn(
+                "Sales (lbs)", format="%,.0f", min_value=0.0),
+        },
+        hide_index=True, use_container_width=True,
+        key="oil_sales_editor", num_rows="fixed",
+    )
+    cp["oil_sales_lbs"] = oil_edited["Oil Sales (lbs)"].tolist()
+
+    # Cascade oil balance
+    o_opening = [0.0] * _POS_N
+    o_closing = [0.0] * _POS_N
+    o_opening[0] = oil_opening_val
+    for _i in range(_POS_N):
+        if _i > 0:
+            o_opening[_i] = o_closing[_i - 1]
+        o_closing[_i] = max(0.0, o_opening[_i] + oil_produced[_i] - cp["oil_sales_lbs"][_i])
+
+    # Oil balance table
+    oil_bal_rows = [
+        ("Opening (lbs)",   o_opening,            JPSI_DARK, ""),
+        ("Produced (lbs)",  oil_produced,          "#f6821f",  ""),
+        ("Sales (lbs)",     cp["oil_sales_lbs"],   NEG_RED,   ""),
+        ("Closing (lbs)",   o_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+    ]
+    oil_rows_html = ""
+    for lbl, vals, color, extra_style in oil_bal_rows:
+        tds = "".join(
+            f'<td style="text-align:right;{extra_style}">{v:,.0f}</td>'
+            for v in vals
+        )
+        oil_rows_html += (
+            f'<tr><td style="{extra_style}font-weight:600;color:{color};">{lbl}</td>{tds}</tr>'
+        )
+    st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr><th>Oil Balance</th>{hdr}</tr></thead>
+  <tbody>{oil_rows_html}</tbody>
+</table></div>""", unsafe_allow_html=True)
+
+    # ── Monthly P&L at live prices ────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Projected Crush P&L — at Live Front-Month Prices</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        f"Meal @ ${front.ZM:.2f}/ton · Oil @ {front.ZL:.3f} ¢/lb · Beans @ {front.ZS:.2f} ¢/bu. "
+        f"Uses current live prices for all months — does not account for forward-curve differences."
+    )
+
+    pnl_rows_html = ""
+    pnl_total_gpm = 0.0
+    any_crush = any(v > 0 for v in cp["crush_bu"])
+    if any_crush:
+        for _i in range(_POS_N):
+            _bu = cp["crush_bu"][_i]
+            if _bu <= 0:
+                continue
+            _meal_rev  = meal_produced[_i] * front.ZM
+            _oil_rev   = oil_produced[_i] * (front.ZL / 100.0)
+            _bean_cost = _bu * (front.ZS / 100.0)
+            _gpm_total = _meal_rev + _oil_rev - _bean_cost
+            _gpm_bu    = _gpm_total / _bu
+            pnl_total_gpm += _gpm_total
+            _gpm_color = POS_GREEN if _gpm_total >= 0 else NEG_RED
+            pnl_rows_html += (
+                f"<tr>"
+                f"<td style='font-weight:600;'>{pm_labels[_i]}</td>"
+                f"<td style='text-align:right;'>{_bu:,.0f}</td>"
+                f"<td style='text-align:right;color:#5aa469;'>${_meal_rev:,.0f}</td>"
+                f"<td style='text-align:right;color:#f6821f;'>${_oil_rev:,.0f}</td>"
+                f"<td style='text-align:right;color:{NEG_RED};'>−${_bean_cost:,.0f}</td>"
+                f"<td style='text-align:right;color:{_gpm_color};font-weight:700;'>${_gpm_total:,.0f}</td>"
+                f"<td style='text-align:right;'>{_gpm_bu*100:.2f} ¢</td>"
+                f"</tr>"
+            )
+        # Totals row
+        total_bu   = sum(v for v in cp["crush_bu"] if v > 0)
+        total_meal = sum(mt * front.ZM for mt, bu in zip(meal_produced, cp["crush_bu"]) if bu > 0)
+        total_oil  = sum(ol * (front.ZL / 100.0) for ol, bu in zip(oil_produced, cp["crush_bu"]) if bu > 0)
+        total_bean = sum(bu * (front.ZS / 100.0) for bu in cp["crush_bu"] if bu > 0)
+        total_color = POS_GREEN if pnl_total_gpm >= 0 else NEG_RED
+        pnl_rows_html += (
+            f"<tr style='font-weight:700;border-top:2px solid #e5e7eb;background:#f6f8fa;'>"
+            f"<td>Total</td>"
+            f"<td style='text-align:right;'>{total_bu:,.0f}</td>"
+            f"<td style='text-align:right;color:#5aa469;'>${total_meal:,.0f}</td>"
+            f"<td style='text-align:right;color:#f6821f;'>${total_oil:,.0f}</td>"
+            f"<td style='text-align:right;color:{NEG_RED};'>−${total_bean:,.0f}</td>"
+            f"<td style='text-align:right;color:{total_color};'>${pnl_total_gpm:,.0f}</td>"
+            f"<td style='text-align:right;'>{pnl_total_gpm/total_bu*100:.2f} ¢</td>"
+            f"</tr>"
+        )
+        st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr>
+    <th>Month</th>
+    <th style="text-align:right;">Crush (bu)</th>
+    <th style="text-align:right;color:#5aa469;">Meal Revenue</th>
+    <th style="text-align:right;color:#f6821f;">Oil Revenue</th>
+    <th style="text-align:right;color:{NEG_RED};">Bean Cost</th>
+    <th style="text-align:right;color:{JPSI_BLUE};">Gross Margin</th>
+    <th style="text-align:right;">Margin/bu</th>
+  </tr></thead>
+  <tbody>{pnl_rows_html}</tbody>
+</table></div>""", unsafe_allow_html=True)
+    else:
+        st.info("Enter crush quantities in the Supply Schedule table above to see projected P&L.")
+
+    # ── Save button ───────────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    _sv1, _sv2 = st.columns([2, 6])
+    if _sv1.button("💾  Save position", type="primary", key="save_crush_pos_btn"):
+        st.session_state["crush_pos"] = cp
+        _save_crush_pos(cp)
+        st.success("Position saved.")
+    _sv2.caption(
+        "Saves opening inventories, supply schedule, and sales to `crush_position.json`. "
+        "On Streamlit Cloud the file is session-ephemeral; Snowflake persistence coming soon."
+    )

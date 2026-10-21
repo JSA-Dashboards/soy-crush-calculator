@@ -1,8 +1,9 @@
 # Streamlit secrets — never commit
 .streamlit/secrets.toml
 
-# Saved hedge positions (local only)
+# Saved positions (local only — ephemeral on Streamlit Cloud)
 hedge_positions.json
+crush_position.json
 
 # Python
 __pycache__/
