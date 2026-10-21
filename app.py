@@ -1678,6 +1678,129 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     else:
         st.info("Enter crush quantities in the Supply Schedule table above to see projected P&L.")
 
+    # ── Hedge Positions ───────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Hedge Positions — ZS / ZM / ZL</div>', unsafe_allow_html=True)
+    st.caption(
+        "Shared with the Hedge Converter tab — changes here are reflected there and vice versa. "
+        "Sign convention: negative Qty = short, positive = long. "
+        "Long crush = short ZS (beans) + long ZM (meal) + long ZL (oil)."
+    )
+
+    if "positions" not in st.session_state:
+        st.session_state["positions"] = _load_positions()
+
+    _hp_df = pd.DataFrame(st.session_state["positions"])
+    _hp_edited = st.data_editor(
+        _hp_df,
+        column_config={
+            "Leg":   st.column_config.SelectboxColumn(
+                "Leg", options=["ZS", "ZM", "ZL"], required=True, width="small"),
+            "Month": st.column_config.TextColumn(
+                "Month", help='e.g. "Nov \'26"', width="small"),
+            "Qty":   st.column_config.NumberColumn(
+                "Qty (contracts)", help="+long / −short", step=1, format="%d"),
+            "Entry": st.column_config.NumberColumn(
+                "Entry price", min_value=0.0, format="%.3f"),
+            "Note":  st.column_config.TextColumn("Note", width="large"),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="pos_tab_hedge_editor",
+    )
+
+    _hb1, _hb2 = st.columns([1, 5])
+    if _hb1.button("💾  Save hedge", type="primary", key="save_hedge_from_pos_btn"):
+        _saved_hp = _hp_edited.to_dict("records")
+        st.session_state["positions"] = _saved_hp
+        _save_positions(_saved_hp)
+        st.success("Hedge positions saved.")
+    if _hb2.button("↺  Reset to defaults", key="reset_hedge_from_pos_btn"):
+        st.session_state["positions"] = [row.copy() for row in _POS_DEFAULTS]
+        _save_positions(st.session_state["positions"])
+        st.rerun()
+
+    # Coverage analysis
+    st.markdown('<div class="sh" style="margin-top:1rem;">Hedge Coverage vs. Crush Plan</div>',
+                unsafe_allow_html=True)
+
+    _hp_rows = _hp_edited.dropna(subset=["Leg", "Qty"]).to_dict("records")
+
+    def _leg_contracts(leg: str) -> float:
+        return sum(r.get("Qty", 0) or 0 for r in _hp_rows if r.get("Leg") == leg)
+
+    _zs_c = _leg_contracts("ZS")
+    _zm_c = _leg_contracts("ZM")
+    _zl_c = _leg_contracts("ZL")
+
+    _zs_bu  = _zs_c * ZS_BU
+    _zm_ton = _zm_c * ZM_TONS
+    _zl_lbs = _zl_c * ZL_LBS
+
+    _total_crush_bu  = sum(cp["crush_bu"])
+    _total_meal_tons = sum(meal_produced)
+    _total_oil_lbs   = sum(oil_produced)
+
+    def _cov_pct(hedged_abs: float, exposure: float) -> str:
+        if exposure == 0:
+            return "<span style='color:#6b7280;'>—</span>"
+        pct = hedged_abs / exposure * 100
+        color = POS_GREEN if pct >= 80 else ("#e8833a" if pct >= 40 else NEG_RED)
+        return f'<span style="color:{color};font-weight:700;">{pct:.1f}%</span>'
+
+    def _contracts_fmt(qty: float, unit: int, unit_label: str) -> str:
+        if qty == 0:
+            return "<span style='color:#6b7280;'>—</span>"
+        total = qty * unit
+        sign = "+" if qty > 0 else ""
+        return (f"{sign}{qty:,.0f} contracts "
+                f"({sign}{total:,.0f} {unit_label})")
+
+    _cov_data = [
+        ("ZS — Beans",
+         f"{_total_crush_bu:,.0f} bu planned crush",
+         _contracts_fmt(_zs_c, ZS_BU, "bu"),
+         _cov_pct(abs(_zs_bu), _total_crush_bu)),
+        ("ZM — Meal",
+         f"{_total_meal_tons:,.1f} tons planned production",
+         _contracts_fmt(_zm_c, ZM_TONS, "tons"),
+         _cov_pct(abs(_zm_ton), _total_meal_tons)),
+        ("ZL — Oil",
+         f"{_total_oil_lbs:,.0f} lbs planned production",
+         _contracts_fmt(_zl_c, ZL_LBS, "lbs"),
+         _cov_pct(abs(_zl_lbs), _total_oil_lbs)),
+    ]
+
+    _cov_html = "".join(
+        f"<tr>"
+        f"<td style='font-weight:600;'>{leg}</td>"
+        f"<td style='text-align:right;color:#6b7280;'>{exp}</td>"
+        f"<td style='text-align:right;'>{hdg}</td>"
+        f"<td style='text-align:right;'>{cov}</td>"
+        f"</tr>"
+        for leg, exp, hdg, cov in _cov_data
+    )
+
+    st.markdown(f"""
+<div class="sheet-wrap"><table>
+  <thead><tr>
+    <th>Leg</th>
+    <th style="text-align:right;color:#6b7280;">Exposure (crush plan)</th>
+    <th style="text-align:right;">Hedged</th>
+    <th style="text-align:right;">Coverage</th>
+  </tr></thead>
+  <tbody>{_cov_html}</tbody>
+</table></div>
+<p style="font-size:0.81rem;color:#6b7280;margin-top:-6px;">
+Coverage = |contracts × contract size| ÷ planned crush/production quantity.
+<span style="color:{POS_GREEN};font-weight:600;">Green ≥ 80%</span> ·
+<span style="color:#e8833a;font-weight:600;">Orange ≥ 40%</span> ·
+<span style="color:{NEG_RED};font-weight:600;">Red &lt; 40%</span>.
+Enter crush quantities above to see exposure totals.
+</p>""", unsafe_allow_html=True)
+
     # ── Save button ───────────────────────────────────────────────────────────
 
     st.markdown("<hr>", unsafe_allow_html=True)
