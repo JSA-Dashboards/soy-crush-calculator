@@ -160,6 +160,74 @@ def _save_crush_pos(data: dict) -> None:
         pass
 
 
+def _extract_ch_report_image(img_bytes: bytes, mime: str) -> dict:
+    """Send a CH Basis report image/screenshot to Claude Vision and extract
+    per-location, per-month to-arrive figures (BASIS POSITION + UNPRICED PURCHASES).
+    Returns a dict compatible with _parse_ch_report output, plus 'us_by_month'
+    and 'york_by_month' dicts keyed by lowercase month labels like 'nov_26'."""
+    try:
+        import base64
+        import anthropic  # installed via requirements.txt
+        api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return {"error": "ANTHROPIC_API_KEY not found in Streamlit secrets."}
+        client = anthropic.Anthropic(api_key=api_key)
+        img_b64 = base64.standard_b64encode(img_bytes).decode()
+        prompt = (
+            "This is a CH Basis report from Du Mond Grain. "
+            "Extract the following and return ONLY a JSON object with no explanation:\n\n"
+            "{\n"
+            '  "company_owned_inventory": <integer from COMPANY OWNED INVENTORY row>,\n'
+            '  "total_stock": <integer from TOTAL STOCK row>,\n'
+            '  "union_springs_total": <integer total from Union Springs BASIS POSITION row>,\n'
+            '  "york_total": <integer total from York Elevator BASIS POSITION row>,\n'
+            '  "us_by_month": { "nearby": N, "nov_26": N, "dec_26": N, "jan_27": N, '
+            '"feb_27": N, "mar_27": N, "apr_27": N, "later": N },\n'
+            '  "york_by_month": { "nearby": N, "nov_26": N, "dec_26": N, "jan_27": N, '
+            '"feb_27": N, "mar_27": N, "apr_27": N, "later": N }\n'
+            "}\n\n"
+            "For us_by_month and york_by_month: add BASIS POSITION + UNPRICED PURCHASES "
+            "for that location and month column. Use 0 for columns that are blank."
+        )
+        resp = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image",
+                     "source": {"type": "base64", "media_type": mime, "data": img_b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw)
+    except Exception as _exc:
+        return {"error": str(_exc)}
+
+
+# Month-label → position-tab month index  (0 = current month = Oct '26)
+_REPORT_MONTH_IDX: dict[str, int] = {
+    "nearby": 0,
+    "nov_26": 1, "nov26": 1,
+    "dec_26": 2, "dec26": 2,
+    "jan_27": 3, "jan27": 3,
+    "feb_27": 4, "feb27": 4,
+    "mar_27": 5, "mar27": 5,
+    "apr_27": 6, "apr27": 6,
+    "may_27": 7, "may27": 7,
+    "jun_27": 8, "jun27": 8,
+    "jul_27": 9, "jul27": 9,
+    "aug_27": 10, "aug27": 10,
+    "later": 10,   # lump "later" into last slot
+}
+
+
 def _parse_ch_report(text: str) -> dict:
     """Extract key inventory totals from a Du Mond-style CH Basis report."""
     result: dict = {}
@@ -1293,35 +1361,104 @@ extruder yield parameters set in the sidebar.
     # ── Quick import from CH Basis report ────────────────────────────────────
 
     with st.expander("📋  Import from CH Basis Report"):
-        st.caption(
-            "Paste the full text of your CH Basis report (e.g. from Du Mond / GrainBridge). "
-            "The parser extracts Company Owned Inventory, Basis Position, Unpriced Purchases, "
-            "and per-location totals for Union Springs and York."
-        )
-        report_text = st.text_area(
-            "Paste report text here", height=180, key="ch_report_paste",
-            placeholder="TOTAL STOCK          217,211   ...\nUNION SPRINGS (100)  444,147...\nYORK ELEVATOR (300)  106,284..."
-        )
-        if st.button("Auto-fill from report", key="ch_parse_btn"):
-            parsed = _parse_ch_report(report_text)
-            if parsed:
-                # Populate per-location opening inventory from location totals
-                if "union_springs_total" in parsed:
-                    cp["us_bean_opening"] = float(parsed["union_springs_total"])
-                elif "company_owned_inventory" in parsed:
-                    cp["us_bean_opening"] = float(parsed["company_owned_inventory"])
-                elif "total_stock" in parsed:
-                    cp["us_bean_opening"] = float(parsed["total_stock"])
-                if "york_total" in parsed:
-                    cp["york_bean_opening"] = float(parsed["york_total"])
-                st.session_state["crush_pos"] = cp
-                _save_crush_pos(cp)
-                detail = " · ".join(
-                    f"{k.replace('_', ' ').title()}: {v:,}" for k, v in parsed.items()
+        _imp_tab_img, _imp_tab_txt = st.tabs(["📷  Upload image / screenshot", "📝  Paste text"])
+
+        with _imp_tab_img:
+            st.caption(
+                "Upload a screenshot or PDF of the CH Basis report. "
+                "Claude Vision reads the Basis Position + Unpriced Purchases columns "
+                "per location and month and fills in the to-arrive schedule automatically."
+            )
+            _has_key = bool(st.secrets.get("ANTHROPIC_API_KEY", ""))
+            if not _has_key:
+                st.warning(
+                    "Add `ANTHROPIC_API_KEY` to your Streamlit Cloud secrets to enable "
+                    "image extraction. The key is available in the JSA 1Password vault."
                 )
-                st.success(f"Parsed: {detail}")
-            else:
-                st.warning("No recognizable data found — paste the full report text.")
+            _img_file = st.file_uploader(
+                "CH Basis report image (PNG, JPG) or PDF",
+                type=["png", "jpg", "jpeg", "pdf"],
+                key="ch_img_upload",
+                disabled=not _has_key,
+            )
+            if _img_file and st.button("Extract from image", key="ch_img_btn", disabled=not _has_key):
+                _mime_map = {
+                    "image/png": "image/png",
+                    "image/jpeg": "image/jpeg",
+                    "image/jpg": "image/jpeg",
+                    "application/pdf": "application/pdf",
+                }
+                _mime = _mime_map.get(_img_file.type, "image/png")
+                with st.spinner("Reading with Claude Vision — a few seconds…"):
+                    _ex = _extract_ch_report_image(_img_file.read(), _mime)
+
+                if "error" in _ex:
+                    st.error(f"Extraction failed: {_ex['error']}")
+                else:
+                    # Populate opening inventory from location totals
+                    if "union_springs_total" in _ex:
+                        cp["us_bean_opening"] = float(_ex["union_springs_total"])
+                    if "york_total" in _ex:
+                        cp["york_bean_opening"] = float(_ex["york_total"])
+
+                    # Populate monthly to-arrive from extracted breakdown
+                    def _apply_by_month(key: str, loc_dict: dict) -> None:
+                        arr = list(cp[key])
+                        for _mkey, _bu in (loc_dict or {}).items():
+                            _idx = _REPORT_MONTH_IDX.get(_mkey.lower().replace("-", "_"))
+                            if _idx is not None and _idx < _POS_N:
+                                arr[_idx] = arr[_idx] + float(_bu or 0)
+                        cp[key] = arr
+
+                    # Reset arrive arrays before applying
+                    cp["us_bean_arrive"]   = [0.0] * _POS_N
+                    cp["york_bean_arrive"] = [0.0] * _POS_N
+                    _apply_by_month("us_bean_arrive",   _ex.get("us_by_month", {}))
+                    _apply_by_month("york_bean_arrive", _ex.get("york_by_month", {}))
+
+                    st.session_state["crush_pos"] = cp
+                    _save_crush_pos(cp)
+
+                    # Show what was extracted
+                    _preview = {
+                        "US Opening (bu)":   f"{cp['us_bean_opening']:,.0f}",
+                        "York Opening (bu)": f"{cp['york_bean_opening']:,.0f}",
+                        "US To-Arrive total": f"{sum(cp['us_bean_arrive']):,.0f}",
+                        "York To-Arrive total": f"{sum(cp['york_bean_arrive']):,.0f}",
+                    }
+                    st.success("Extracted and applied! " +
+                               " · ".join(f"{k}: {v}" for k, v in _preview.items()))
+                    st.rerun()
+
+        with _imp_tab_txt:
+            st.caption(
+                "Paste the full text of your CH Basis report (e.g. from Du Mond / GrainBridge). "
+                "The parser extracts Company Owned Inventory, Basis Position, Unpriced Purchases, "
+                "and per-location totals for Union Springs and York."
+            )
+            report_text = st.text_area(
+                "Paste report text here", height=180, key="ch_report_paste",
+                placeholder="TOTAL STOCK          217,211   ...\nUNION SPRINGS (100)  444,147...\nYORK ELEVATOR (300)  106,284..."
+            )
+            if st.button("Auto-fill from report", key="ch_parse_btn"):
+                parsed = _parse_ch_report(report_text)
+                if parsed:
+                    if "union_springs_total" in parsed:
+                        cp["us_bean_opening"] = float(parsed["union_springs_total"])
+                    elif "company_owned_inventory" in parsed:
+                        cp["us_bean_opening"] = float(parsed["company_owned_inventory"])
+                    elif "total_stock" in parsed:
+                        cp["us_bean_opening"] = float(parsed["total_stock"])
+                    if "york_total" in parsed:
+                        cp["york_bean_opening"] = float(parsed["york_total"])
+                    st.session_state["crush_pos"] = cp
+                    _save_crush_pos(cp)
+                    detail = " · ".join(
+                        f"{k.replace('_', ' ').title()}: {v:,}" for k, v in parsed.items()
+                    )
+                    st.success(f"Parsed: {detail}")
+                else:
+                    st.warning("No recognizable data found — paste the full report text.")
 
     with st.expander("📥  Restore saved position from file"):
         st.caption(
