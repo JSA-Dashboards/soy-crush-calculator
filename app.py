@@ -1323,6 +1323,34 @@ extruder yield parameters set in the sidebar.
             else:
                 st.warning("No recognizable data found — paste the full report text.")
 
+    with st.expander("📥  Restore saved position from file"):
+        st.caption(
+            "Upload a `crush_position.json` file you previously downloaded to restore all "
+            "inventory, supply, and crush schedule data."
+        )
+        _upload = st.file_uploader(
+            "Upload crush_position.json", type="json", key="crush_pos_upload",
+        )
+        if _upload is not None:
+            try:
+                _uploaded_data = json.loads(_upload.read().decode())
+                # Run through the same migration + fill logic
+                if "crush_bu" in _uploaded_data and "us_crush_bu" not in _uploaded_data:
+                    _uploaded_data["us_crush_bu"]   = _uploaded_data.pop("crush_bu")
+                    _uploaded_data["york_crush_bu"] = [0.0] * _POS_N
+                _uploaded_data.pop("crush_bu", None)
+                for _k, _v in _CRUSH_POS_DEFAULTS.items():
+                    if _k not in _uploaded_data:
+                        _uploaded_data[_k] = list(_v) if isinstance(_v, list) else _v
+                    elif isinstance(_v, list) and len(_uploaded_data[_k]) != _POS_N:
+                        _uploaded_data[_k] = (_uploaded_data[_k] + [0.0] * _POS_N)[:_POS_N]
+                st.session_state["crush_pos"] = _uploaded_data
+                _save_crush_pos(_uploaded_data)
+                st.success("Position restored from file — data populated above.")
+                st.rerun()
+            except Exception as _e:
+                st.error(f"Could not parse file: {_e}")
+
     # ── Soybean Supply by Location ────────────────────────────────────────────
 
     st.markdown('<div class="sh">Soybean Supply by Location</div>', unsafe_allow_html=True)
@@ -1343,7 +1371,7 @@ extruder yield parameters set in the sidebar.
         )
         us_opening_val = st.number_input(
             "Opening inventory (bu)", value=float(cp.get("us_bean_opening", 0.0)),
-            min_value=0.0, step=1000.0, format="%.0f", key="us_opening_in",
+            step=1000.0, format="%.0f", key="us_opening_in",
         )
         cp["us_bean_opening"] = us_opening_val
 
@@ -1371,7 +1399,7 @@ extruder yield parameters set in the sidebar.
         )
         york_opening_val = st.number_input(
             "Opening inventory (bu)", value=float(cp.get("york_bean_opening", 0.0)),
-            min_value=0.0, step=1000.0, format="%.0f", key="york_opening_in",
+            step=1000.0, format="%.0f", key="york_opening_in",
         )
         cp["york_bean_opening"] = york_opening_val
 
@@ -1427,32 +1455,41 @@ extruder yield parameters set in the sidebar.
         if _i > 0:
             b_opening[_i] = b_closing[_i - 1]
         b_avail[_i]   = b_opening[_i] + comb_arrive[_i]
-        b_closing[_i] = max(0.0, b_avail[_i] - comb_crush_bu[_i])
+        b_closing[_i] = b_avail[_i] - comb_crush_bu[_i]
 
     hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels[:n_show])
 
+    def _sc(v):
+        return POS_GREEN if float(v) >= 0 else NEG_RED
+
     _bal_rows = [
-        ("Opening (bu)",           b_opening[:n_show],             JPSI_DARK, ""),
+        ("Opening (bu)",           b_opening[:n_show],             JPSI_DARK, "", None),
         ("  ↳ Union Springs",      [us_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
-         "#6b7280", "font-size:0.85rem;"),
+         "#6b7280", "font-size:0.85rem;", None),
         ("  ↳ York",               [york_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
-         "#6b7280", "font-size:0.85rem;"),
-        ("To-Arrive (bu)",         comb_arrive[:n_show],           JPSI_DARK, "border-top:1px solid #f0f0f0;"),
-        ("  ↳ Union Springs",      cp["us_bean_arrive"][:n_show],  "#6b7280", "font-size:0.85rem;"),
-        ("  ↳ York",               cp["york_bean_arrive"][:n_show], "#6b7280", "font-size:0.85rem;"),
-        ("Total Available (bu)",   b_avail[:n_show],               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;"),
-        ("Crush Planned (bu)",     comb_crush_bu[:n_show],         NEG_RED,   ""),
-        ("  ↳ Union Springs",      cp["us_crush_bu"][:n_show],     "#6b7280", "font-size:0.85rem;"),
-        ("  ↳ York",               cp["york_crush_bu"][:n_show],   "#6b7280", "font-size:0.85rem;"),
-        ("Closing Inventory (bu)", b_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+         "#6b7280", "font-size:0.85rem;", None),
+        ("To-Arrive (bu)",         comb_arrive[:n_show],           JPSI_DARK, "border-top:1px solid #f0f0f0;", None),
+        ("  ↳ Union Springs",      cp["us_bean_arrive"][:n_show],  "#6b7280", "font-size:0.85rem;", None),
+        ("  ↳ York",               cp["york_bean_arrive"][:n_show], "#6b7280", "font-size:0.85rem;", None),
+        ("Total Available (bu)",   b_avail[:n_show],               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;", None),
+        ("Crush Planned (bu)",     comb_crush_bu[:n_show],         NEG_RED,   "", None),
+        ("  ↳ Union Springs",      cp["us_crush_bu"][:n_show],     "#6b7280", "font-size:0.85rem;", None),
+        ("  ↳ York",               cp["york_crush_bu"][:n_show],   "#6b7280", "font-size:0.85rem;", None),
+        ("Closing Inventory (bu)", b_closing[:n_show],             JPSI_DARK, "font-weight:700;background:#f6f8fa;", _sc),
     ]
 
     rows_html = ""
-    for _label, _vals, _color, _extra in _bal_rows:
-        _tds = "".join(
-            f'<td style="text-align:right;{_extra}">{float(v):,.0f}</td>'
-            for v in _vals
-        )
+    for _label, _vals, _color, _extra, _cfn in _bal_rows:
+        if _cfn is not None:
+            _tds = "".join(
+                f'<td style="text-align:right;{_extra};color:{_cfn(v)};">{float(v):,.0f}</td>'
+                for v in _vals
+            )
+        else:
+            _tds = "".join(
+                f'<td style="text-align:right;{_extra}">{float(v):,.0f}</td>'
+                for v in _vals
+            )
         _fw = "400" if _label.startswith("  ↳") else "600"
         rows_html += (
             f'<tr><td style="{_extra}font-weight:{_fw};color:{_color};">{_label}</td>{_tds}</tr>'
@@ -1542,21 +1579,27 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     for _i in range(_POS_N):
         if _i > 0:
             m_opening[_i] = m_closing[_i - 1]
-        m_closing[_i] = max(0.0, m_opening[_i] + meal_produced[_i] - cp["meal_sales_tons"][_i])
+        m_closing[_i] = m_opening[_i] + meal_produced[_i] - cp["meal_sales_tons"][_i]
 
     # Meal balance table
     meal_bal_rows = [
-        ("Opening (tons)",    m_opening[:n_show],            JPSI_DARK, ""),
-        ("Produced (tons)",   meal_produced[:n_show],         JPSI_BLUE, ""),
-        ("Sales (tons)",      cp["meal_sales_tons"][:n_show], NEG_RED,   ""),
-        ("Closing (tons)",    m_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+        ("Opening (tons)",    m_opening[:n_show],            JPSI_DARK, "", None),
+        ("Produced (tons)",   meal_produced[:n_show],         JPSI_BLUE, "", None),
+        ("Sales (tons)",      cp["meal_sales_tons"][:n_show], NEG_RED,   "", None),
+        ("Closing (tons)",    m_closing[:n_show],             JPSI_DARK, "font-weight:700;background:#f6f8fa;", _sc),
     ]
     meal_rows_html = ""
-    for lbl, vals, color, extra_style in meal_bal_rows:
-        tds = "".join(
-            f'<td style="text-align:right;{extra_style}">{v:,.1f}</td>'
-            for v in vals
-        )
+    for lbl, vals, color, extra_style, cfn in meal_bal_rows:
+        if cfn is not None:
+            tds = "".join(
+                f'<td style="text-align:right;{extra_style};color:{cfn(v)};">{v:,.1f}</td>'
+                for v in vals
+            )
+        else:
+            tds = "".join(
+                f'<td style="text-align:right;{extra_style}">{v:,.1f}</td>'
+                for v in vals
+            )
         meal_rows_html += (
             f'<tr><td style="{extra_style}font-weight:600;color:{color};">{lbl}</td>{tds}</tr>'
         )
@@ -1575,7 +1618,7 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     oil_opening_val = _oc1.number_input(
         "Oil opening inventory (lbs)",
         value=float(cp.get("oil_opening_lbs", 0.0)),
-        min_value=0.0, step=1000.0, format="%.0f",
+        step=1000.0, format="%.0f",
         key="oil_opening_in",
         help="Current on-hand oil inventory in lbs.",
     )
@@ -1608,21 +1651,27 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     for _i in range(_POS_N):
         if _i > 0:
             o_opening[_i] = o_closing[_i - 1]
-        o_closing[_i] = max(0.0, o_opening[_i] + oil_produced[_i] - cp["oil_sales_lbs"][_i])
+        o_closing[_i] = o_opening[_i] + oil_produced[_i] - cp["oil_sales_lbs"][_i]
 
     # Oil balance table
     oil_bal_rows = [
-        ("Opening (lbs)",   o_opening[:n_show],            JPSI_DARK, ""),
-        ("Produced (lbs)",  oil_produced[:n_show],          "#f6821f",  ""),
-        ("Sales (lbs)",     cp["oil_sales_lbs"][:n_show],   NEG_RED,   ""),
-        ("Closing (lbs)",   o_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+        ("Opening (lbs)",   o_opening[:n_show],            JPSI_DARK, "", None),
+        ("Produced (lbs)",  oil_produced[:n_show],          "#f6821f",  "", None),
+        ("Sales (lbs)",     cp["oil_sales_lbs"][:n_show],   NEG_RED,   "", None),
+        ("Closing (lbs)",   o_closing[:n_show],             JPSI_DARK, "font-weight:700;background:#f6f8fa;", _sc),
     ]
     oil_rows_html = ""
-    for lbl, vals, color, extra_style in oil_bal_rows:
-        tds = "".join(
-            f'<td style="text-align:right;{extra_style}">{v:,.0f}</td>'
-            for v in vals
-        )
+    for lbl, vals, color, extra_style, cfn in oil_bal_rows:
+        if cfn is not None:
+            tds = "".join(
+                f'<td style="text-align:right;{extra_style};color:{cfn(v)};">{v:,.0f}</td>'
+                for v in vals
+            )
+        else:
+            tds = "".join(
+                f'<td style="text-align:right;{extra_style}">{v:,.0f}</td>'
+                for v in vals
+            )
         oil_rows_html += (
             f'<tr><td style="{extra_style}font-weight:600;color:{color};">{lbl}</td>{tds}</tr>'
         )
@@ -1824,15 +1873,23 @@ Coverage = |contracts × contract size| ÷ planned crush/production quantity.
 Enter crush quantities above to see exposure totals.
 </p>""", unsafe_allow_html=True)
 
-    # ── Save button ───────────────────────────────────────────────────────────
+    # ── Save / Download ───────────────────────────────────────────────────────
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    _sv1, _sv2 = st.columns([2, 6])
+    _sv1, _sv2, _sv3 = st.columns([2, 2, 4])
     if _sv1.button("💾  Save position", type="primary", key="save_crush_pos_btn"):
         st.session_state["crush_pos"] = cp
         _save_crush_pos(cp)
         st.success("Position saved.")
-    _sv2.caption(
-        "Saves opening inventories, supply schedule, and sales to `crush_position.json`. "
-        "On Streamlit Cloud the file is session-ephemeral; Snowflake persistence coming soon."
+    _sv2.download_button(
+        label="⬇️  Download position",
+        data=json.dumps(cp, indent=2).encode(),
+        file_name="crush_position.json",
+        mime="application/json",
+        key="download_crush_pos_btn",
+    )
+    _sv3.caption(
+        "Download saves a backup to your computer. "
+        "On Streamlit Cloud the file resets on each reboot — "
+        "use **Restore saved position from file** at the top to reload it."
     )
