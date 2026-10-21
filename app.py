@@ -84,7 +84,7 @@ def _save_positions(rows: list[dict]) -> None:
 # ── Crush position persistence ────────────────────────────────────────────────
 
 _CRUSH_POS_FILE = Path(__file__).parent / "crush_position.json"
-_POS_N = 6   # months to track forward
+_POS_N = 11  # months stored (Oct → Aug); display sliced to 6 or 11 via toggle
 
 
 def _pos_month_labels(n: int = _POS_N) -> list[str]:
@@ -1280,7 +1280,15 @@ extruder yield parameters set in the sidebar.
         st.session_state["crush_pos"] = _load_crush_pos()
 
     cp = st.session_state["crush_pos"]
-    pm_labels = _pos_month_labels()  # 6 month strings starting this month
+    pm_labels = _pos_month_labels()  # 11 month labels starting this month
+
+    _ext_col, _ = st.columns([3, 5])
+    _show_ext = _ext_col.checkbox(
+        "📅  Expand to extended view (through Aug)",
+        value=False,
+        key="crush_extended",
+    )
+    n_show = 11 if _show_ext else 6
 
     # ── Quick import from CH Basis report ────────────────────────────────────
 
@@ -1340,8 +1348,8 @@ extruder yield parameters set in the sidebar.
         cp["us_bean_opening"] = us_opening_val
 
         us_df = pd.DataFrame({
-            "Month":          pm_labels,
-            "To-Arrive (bu)": [float(v) for v in cp["us_bean_arrive"]],
+            "Month":          pm_labels[:n_show],
+            "To-Arrive (bu)": [float(v) for v in cp["us_bean_arrive"][:n_show]],
         })
         us_edited = st.data_editor(
             us_df,
@@ -1351,7 +1359,7 @@ extruder yield parameters set in the sidebar.
             },
             hide_index=True, use_container_width=True, key="us_supply_editor", num_rows="fixed",
         )
-        cp["us_bean_arrive"] = us_edited["To-Arrive (bu)"].tolist()
+        cp["us_bean_arrive"] = us_edited["To-Arrive (bu)"].tolist() + cp["us_bean_arrive"][n_show:]
 
     # ── York ──────────────────────────────────────────────────────────────────
     with _loc2:
@@ -1368,8 +1376,8 @@ extruder yield parameters set in the sidebar.
         cp["york_bean_opening"] = york_opening_val
 
         york_df = pd.DataFrame({
-            "Month":          pm_labels,
-            "To-Arrive (bu)": [float(v) for v in cp["york_bean_arrive"]],
+            "Month":          pm_labels[:n_show],
+            "To-Arrive (bu)": [float(v) for v in cp["york_bean_arrive"][:n_show]],
         })
         york_edited = st.data_editor(
             york_df,
@@ -1379,16 +1387,16 @@ extruder yield parameters set in the sidebar.
             },
             hide_index=True, use_container_width=True, key="york_supply_editor", num_rows="fixed",
         )
-        cp["york_bean_arrive"] = york_edited["To-Arrive (bu)"].tolist()
+        cp["york_bean_arrive"] = york_edited["To-Arrive (bu)"].tolist() + cp["york_bean_arrive"][n_show:]
 
     # ── Crush schedule (per plant) ────────────────────────────────────────────
 
     st.markdown('<div class="sh">Crush Schedule</div>', unsafe_allow_html=True)
 
     crush_df = pd.DataFrame({
-        "Month":                  pm_labels,
-        "Union Springs (bu)":     [float(v) for v in cp["us_crush_bu"]],
-        "York (bu)":              [float(v) for v in cp["york_crush_bu"]],
+        "Month":                  pm_labels[:n_show],
+        "Union Springs (bu)":     [float(v) for v in cp["us_crush_bu"][:n_show]],
+        "York (bu)":              [float(v) for v in cp["york_crush_bu"][:n_show]],
     })
     crush_edited = st.data_editor(
         crush_df,
@@ -1401,8 +1409,8 @@ extruder yield parameters set in the sidebar.
         },
         hide_index=True, use_container_width=True, key="crush_schedule_editor", num_rows="fixed",
     )
-    cp["us_crush_bu"]   = crush_edited["Union Springs (bu)"].tolist()
-    cp["york_crush_bu"] = crush_edited["York (bu)"].tolist()
+    cp["us_crush_bu"]   = crush_edited["Union Springs (bu)"].tolist() + cp["us_crush_bu"][n_show:]
+    cp["york_crush_bu"] = crush_edited["York (bu)"].tolist() + cp["york_crush_bu"][n_show:]
     comb_crush_bu = [cp["us_crush_bu"][_i] + cp["york_crush_bu"][_i] for _i in range(_POS_N)]
 
     # ── Combined supply balance (cascading) ───────────────────────────────────
@@ -1421,22 +1429,22 @@ extruder yield parameters set in the sidebar.
         b_avail[_i]   = b_opening[_i] + comb_arrive[_i]
         b_closing[_i] = max(0.0, b_avail[_i] - comb_crush_bu[_i])
 
-    hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels)
+    hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels[:n_show])
 
     _bal_rows = [
-        ("Opening (bu)",           b_opening,             JPSI_DARK, ""),
-        ("  ↳ Union Springs",      [us_opening_val if _i == 0 else 0.0 for _i in range(_POS_N)],
+        ("Opening (bu)",           b_opening[:n_show],             JPSI_DARK, ""),
+        ("  ↳ Union Springs",      [us_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
          "#6b7280", "font-size:0.85rem;"),
-        ("  ↳ York",               [york_opening_val if _i == 0 else 0.0 for _i in range(_POS_N)],
+        ("  ↳ York",               [york_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
          "#6b7280", "font-size:0.85rem;"),
-        ("To-Arrive (bu)",         comb_arrive,           JPSI_DARK, "border-top:1px solid #f0f0f0;"),
-        ("  ↳ Union Springs",      cp["us_bean_arrive"],  "#6b7280", "font-size:0.85rem;"),
-        ("  ↳ York",               cp["york_bean_arrive"], "#6b7280", "font-size:0.85rem;"),
-        ("Total Available (bu)",   b_avail,               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;"),
-        ("Crush Planned (bu)",     comb_crush_bu,         NEG_RED,   ""),
-        ("  ↳ Union Springs",      cp["us_crush_bu"],     "#6b7280", "font-size:0.85rem;"),
-        ("  ↳ York",               cp["york_crush_bu"],   "#6b7280", "font-size:0.85rem;"),
-        ("Closing Inventory (bu)", b_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+        ("To-Arrive (bu)",         comb_arrive[:n_show],           JPSI_DARK, "border-top:1px solid #f0f0f0;"),
+        ("  ↳ Union Springs",      cp["us_bean_arrive"][:n_show],  "#6b7280", "font-size:0.85rem;"),
+        ("  ↳ York",               cp["york_bean_arrive"][:n_show], "#6b7280", "font-size:0.85rem;"),
+        ("Total Available (bu)",   b_avail[:n_show],               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;"),
+        ("Crush Planned (bu)",     comb_crush_bu[:n_show],         NEG_RED,   ""),
+        ("  ↳ Union Springs",      cp["us_crush_bu"][:n_show],     "#6b7280", "font-size:0.85rem;"),
+        ("  ↳ York",               cp["york_crush_bu"][:n_show],   "#6b7280", "font-size:0.85rem;"),
+        ("Closing Inventory (bu)", b_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
     ]
 
     rows_html = ""
@@ -1465,7 +1473,8 @@ extruder yield parameters set in the sidebar.
     oil_produced  = [bu * ext_oil_lbs   for bu in comb_crush_bu]  # lbs
 
     prod_rows_html = ""
-    for _lbl, _bu, _mt, _ol in zip(pm_labels, comb_crush_bu, meal_produced, oil_produced):
+    for _lbl, _bu, _mt, _ol in zip(pm_labels[:n_show], comb_crush_bu[:n_show],
+                                    meal_produced[:n_show], oil_produced[:n_show]):
         prod_rows_html += (
             f"<tr>"
             f"<td style='font-weight:600;'>{_lbl}</td>"
@@ -1511,8 +1520,8 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     )
 
     meal_sales_df = pd.DataFrame({
-        "Month":              pm_labels,
-        "Meal Sales (tons)":  [float(v) for v in cp["meal_sales_tons"]],
+        "Month":              pm_labels[:n_show],
+        "Meal Sales (tons)":  [float(v) for v in cp["meal_sales_tons"][:n_show]],
     })
     meal_edited = st.data_editor(
         meal_sales_df,
@@ -1524,7 +1533,7 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
         hide_index=True, use_container_width=True,
         key="meal_sales_editor", num_rows="fixed",
     )
-    cp["meal_sales_tons"] = meal_edited["Meal Sales (tons)"].tolist()
+    cp["meal_sales_tons"] = meal_edited["Meal Sales (tons)"].tolist() + cp["meal_sales_tons"][n_show:]
 
     # Cascade meal balance
     m_opening = [0.0] * _POS_N
@@ -1537,10 +1546,10 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
 
     # Meal balance table
     meal_bal_rows = [
-        ("Opening (tons)",    m_opening,            JPSI_DARK, ""),
-        ("Produced (tons)",   meal_produced,         JPSI_BLUE, ""),
-        ("Sales (tons)",      cp["meal_sales_tons"], NEG_RED,   ""),
-        ("Closing (tons)",    m_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+        ("Opening (tons)",    m_opening[:n_show],            JPSI_DARK, ""),
+        ("Produced (tons)",   meal_produced[:n_show],         JPSI_BLUE, ""),
+        ("Sales (tons)",      cp["meal_sales_tons"][:n_show], NEG_RED,   ""),
+        ("Closing (tons)",    m_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
     ]
     meal_rows_html = ""
     for lbl, vals, color, extra_style in meal_bal_rows:
@@ -1577,8 +1586,8 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     )
 
     oil_sales_df = pd.DataFrame({
-        "Month":            pm_labels,
-        "Oil Sales (lbs)":  [float(v) for v in cp["oil_sales_lbs"]],
+        "Month":            pm_labels[:n_show],
+        "Oil Sales (lbs)":  [float(v) for v in cp["oil_sales_lbs"][:n_show]],
     })
     oil_edited = st.data_editor(
         oil_sales_df,
@@ -1590,7 +1599,7 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
         hide_index=True, use_container_width=True,
         key="oil_sales_editor", num_rows="fixed",
     )
-    cp["oil_sales_lbs"] = oil_edited["Oil Sales (lbs)"].tolist()
+    cp["oil_sales_lbs"] = oil_edited["Oil Sales (lbs)"].tolist() + cp["oil_sales_lbs"][n_show:]
 
     # Cascade oil balance
     o_opening = [0.0] * _POS_N
@@ -1603,10 +1612,10 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
 
     # Oil balance table
     oil_bal_rows = [
-        ("Opening (lbs)",   o_opening,            JPSI_DARK, ""),
-        ("Produced (lbs)",  oil_produced,          "#f6821f",  ""),
-        ("Sales (lbs)",     cp["oil_sales_lbs"],   NEG_RED,   ""),
-        ("Closing (lbs)",   o_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+        ("Opening (lbs)",   o_opening[:n_show],            JPSI_DARK, ""),
+        ("Produced (lbs)",  oil_produced[:n_show],          "#f6821f",  ""),
+        ("Sales (lbs)",     cp["oil_sales_lbs"][:n_show],   NEG_RED,   ""),
+        ("Closing (lbs)",   o_closing[:n_show],             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
     ]
     oil_rows_html = ""
     for lbl, vals, color, extra_style in oil_bal_rows:
@@ -1635,9 +1644,9 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
 
     pnl_rows_html = ""
     pnl_total_gpm = 0.0
-    any_crush = any(v > 0 for v in comb_crush_bu)
+    any_crush = any(v > 0 for v in comb_crush_bu[:n_show])
     if any_crush:
-        for _i in range(_POS_N):
+        for _i in range(n_show):
             _bu = comb_crush_bu[_i]
             if _bu <= 0:
                 continue
@@ -1660,10 +1669,10 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
                 f"</tr>"
             )
         # Totals row
-        total_bu   = sum(v for v in comb_crush_bu if v > 0)
-        total_meal = sum(mt * front.ZM for mt, bu in zip(meal_produced, comb_crush_bu) if bu > 0)
-        total_oil  = sum(ol * (front.ZL / 100.0) for ol, bu in zip(oil_produced, comb_crush_bu) if bu > 0)
-        total_bean = sum(bu * (front.ZS / 100.0) for bu in comb_crush_bu if bu > 0)
+        total_bu   = sum(v for v in comb_crush_bu[:n_show] if v > 0)
+        total_meal = sum(mt * front.ZM for mt, bu in zip(meal_produced[:n_show], comb_crush_bu[:n_show]) if bu > 0)
+        total_oil  = sum(ol * (front.ZL / 100.0) for ol, bu in zip(oil_produced[:n_show], comb_crush_bu[:n_show]) if bu > 0)
+        total_bean = sum(bu * (front.ZS / 100.0) for bu in comb_crush_bu[:n_show] if bu > 0)
         total_color = POS_GREEN if pnl_total_gpm >= 0 else NEG_RED
         pnl_rows_html += (
             f"<tr style='font-weight:700;border-top:2px solid #e5e7eb;background:#f6f8fa;'>"
@@ -1753,9 +1762,9 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     _zm_ton = _zm_c * ZM_TONS
     _zl_lbs = _zl_c * ZL_LBS
 
-    _total_crush_bu  = sum(comb_crush_bu)
-    _total_meal_tons = sum(meal_produced)
-    _total_oil_lbs   = sum(oil_produced)
+    _total_crush_bu  = sum(comb_crush_bu[:n_show])
+    _total_meal_tons = sum(meal_produced[:n_show])
+    _total_oil_lbs   = sum(oil_produced[:n_show])
 
     def _cov_pct(hedged_abs: float, exposure: float) -> str:
         if exposure == 0:
