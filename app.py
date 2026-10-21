@@ -98,10 +98,15 @@ def _pos_month_labels(n: int = _POS_N) -> list[str]:
 
 
 _CRUSH_POS_DEFAULTS: dict = {
-    "bean_opening":      0.0,
-    "bean_priced":       [0.0] * _POS_N,
-    "bean_unpriced":     [0.0] * _POS_N,
-    "crush_bu":          [0.0] * _POS_N,
+    # Location: Union Springs
+    "us_bean_opening": 0.0,
+    "us_bean_arrive":  [0.0] * _POS_N,
+    # Location: York
+    "york_bean_opening": 0.0,
+    "york_bean_arrive":  [0.0] * _POS_N,
+    # Combined crush schedule
+    "crush_bu": [0.0] * _POS_N,
+    # Product balances
     "meal_opening_tons": 0.0,
     "meal_sales_tons":   [0.0] * _POS_N,
     "oil_opening_lbs":   0.0,
@@ -112,9 +117,27 @@ _CRUSH_POS_DEFAULTS: dict = {
 def _load_crush_pos() -> dict:
     try:
         data = json.loads(_CRUSH_POS_FILE.read_text())
+        # Migrate old single-location format → two-location format
+        if "bean_opening" in data and "us_bean_opening" not in data:
+            data["us_bean_opening"] = data.pop("bean_opening", 0.0)
+            old_p = data.pop("bean_priced",   [0.0] * _POS_N)
+            old_u = data.pop("bean_unpriced", [0.0] * _POS_N)
+            data["us_bean_arrive"] = [p + u for p, u in zip(old_p, old_u)]
+        # Migrate priced+unpriced → combined arrive if old two-column format
+        if "us_bean_priced" in data and "us_bean_arrive" not in data:
+            data["us_bean_arrive"] = [
+                p + u for p, u in zip(data.pop("us_bean_priced", [0.0] * _POS_N),
+                                       data.pop("us_bean_unpriced", [0.0] * _POS_N))
+            ]
+        if "york_bean_priced" in data and "york_bean_arrive" not in data:
+            data["york_bean_arrive"] = [
+                p + u for p, u in zip(data.pop("york_bean_priced", [0.0] * _POS_N),
+                                       data.pop("york_bean_unpriced", [0.0] * _POS_N))
+            ]
+        # Fill any missing keys from defaults
         for k, v in _CRUSH_POS_DEFAULTS.items():
             if k not in data:
-                data[k] = v
+                data[k] = list(v) if isinstance(v, list) else v
             elif isinstance(v, list) and len(data[k]) != _POS_N:
                 data[k] = (data[k] + [0.0] * _POS_N)[:_POS_N]
         return data
@@ -151,6 +174,15 @@ def _parse_ch_report(text: str) -> dict:
             nums = re.findall(r"[\d,]+", s)
             if nums:
                 result["basis_position"] = int(nums[0].replace(",", ""))
+        # Location-specific rows (basis position or unpriced by location)
+        if re.search(r"UNION\s+SPRINGS", s, re.IGNORECASE):
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["union_springs_total"] = int(nums[0].replace(",", ""))
+        if re.search(r"YORK", s, re.IGNORECASE) and "NEW YORK" not in s.upper():
+            nums = re.findall(r"[\d,]+", s)
+            if nums:
+                result["york_total"] = int(nums[0].replace(",", ""))
     return result
 
 
@@ -1248,20 +1280,25 @@ extruder yield parameters set in the sidebar.
     with st.expander("📋  Import from CH Basis Report"):
         st.caption(
             "Paste the full text of your CH Basis report (e.g. from Du Mond / GrainBridge). "
-            "The parser extracts Total Stock, Company Owned Inventory, Unpriced Purchases, "
-            "and total Basis Position."
+            "The parser extracts Company Owned Inventory, Basis Position, Unpriced Purchases, "
+            "and per-location totals for Union Springs and York."
         )
         report_text = st.text_area(
             "Paste report text here", height=180, key="ch_report_paste",
-            placeholder="TOTAL STOCK          217,211   ...\nCOMPANY OWNED INVENTORY  200,544\n..."
+            placeholder="TOTAL STOCK          217,211   ...\nUNION SPRINGS (100)  444,147...\nYORK ELEVATOR (300)  106,284..."
         )
         if st.button("Auto-fill from report", key="ch_parse_btn"):
             parsed = _parse_ch_report(report_text)
             if parsed:
-                if "company_owned_inventory" in parsed:
-                    cp["bean_opening"] = float(parsed["company_owned_inventory"])
+                # Populate per-location opening inventory from location totals
+                if "union_springs_total" in parsed:
+                    cp["us_bean_opening"] = float(parsed["union_springs_total"])
+                elif "company_owned_inventory" in parsed:
+                    cp["us_bean_opening"] = float(parsed["company_owned_inventory"])
                 elif "total_stock" in parsed:
-                    cp["bean_opening"] = float(parsed["total_stock"])
+                    cp["us_bean_opening"] = float(parsed["total_stock"])
+                if "york_total" in parsed:
+                    cp["york_bean_opening"] = float(parsed["york_total"])
                 st.session_state["crush_pos"] = cp
                 _save_crush_pos(cp)
                 detail = " · ".join(
@@ -1271,103 +1308,137 @@ extruder yield parameters set in the sidebar.
             else:
                 st.warning("No recognizable data found — paste the full report text.")
 
-    # ── Soybean Supply Schedule ───────────────────────────────────────────────
+    # ── Soybean Supply by Location ────────────────────────────────────────────
 
-    st.markdown('<div class="sh">Soybean Supply Schedule</div>', unsafe_allow_html=True)
-
-    _c1, _c2 = st.columns([2, 4])
-    bean_opening_val = _c1.number_input(
-        "Opening bean inventory (bu)",
-        value=float(cp.get("bean_opening", 0.0)),
-        min_value=0.0, step=1000.0, format="%.0f",
-        key="bean_opening_in",
-        help="Current on-hand inventory. From CH report: COMPANY OWNED INVENTORY",
-    )
-    cp["bean_opening"] = bean_opening_val
-    _c2.caption(
-        f"Enter your current on-hand bean inventory. "
-        f"Subsequent months' opening = prior month's closing. "
-        f"To-Arrive Priced = purchased basis contracts; Unpriced = DP/unpriced grain."
+    st.markdown('<div class="sh">Soybean Supply by Location</div>', unsafe_allow_html=True)
+    st.caption(
+        "Enter to-arrive quantities (priced basis contracts and unpriced/DP grain) "
+        "by delivery month for each location. Opening inventory = current on-hand bushels."
     )
 
-    # Editable supply inputs
-    bean_input_df = pd.DataFrame({
-        "Month":                   pm_labels,
-        "To-Arrive Priced (bu)":   [float(v) for v in cp["bean_priced"]],
-        "To-Arrive Unpriced (bu)": [float(v) for v in cp["bean_unpriced"]],
-        "Crush Planned (bu)":      [float(v) for v in cp["crush_bu"]],
+    _loc1, _loc2 = st.columns(2)
+
+    # ── Union Springs ──────────────────────────────────────────────────────────
+    with _loc1:
+        st.markdown(
+            f'<div style="font-weight:700;font-size:1rem;color:{JPSI_DARK};'
+            f'border-left:3px solid {JPSI_BLUE};padding-left:8px;margin-bottom:8px;">'
+            f'📍 Union Springs</div>',
+            unsafe_allow_html=True,
+        )
+        us_opening_val = st.number_input(
+            "Opening inventory (bu)", value=float(cp.get("us_bean_opening", 0.0)),
+            min_value=0.0, step=1000.0, format="%.0f", key="us_opening_in",
+        )
+        cp["us_bean_opening"] = us_opening_val
+
+        us_df = pd.DataFrame({
+            "Month":          pm_labels,
+            "To-Arrive (bu)": [float(v) for v in cp["us_bean_arrive"]],
+        })
+        us_edited = st.data_editor(
+            us_df,
+            column_config={
+                "Month":          st.column_config.TextColumn("Month", disabled=True, width="small"),
+                "To-Arrive (bu)": st.column_config.NumberColumn("To-Arrive (bu)", format="%,.0f", min_value=0.0),
+            },
+            hide_index=True, use_container_width=True, key="us_supply_editor", num_rows="fixed",
+        )
+        cp["us_bean_arrive"] = us_edited["To-Arrive (bu)"].tolist()
+
+    # ── York ──────────────────────────────────────────────────────────────────
+    with _loc2:
+        st.markdown(
+            f'<div style="font-weight:700;font-size:1rem;color:{JPSI_DARK};'
+            f'border-left:3px solid #f6821f;padding-left:8px;margin-bottom:8px;">'
+            f'📍 York</div>',
+            unsafe_allow_html=True,
+        )
+        york_opening_val = st.number_input(
+            "Opening inventory (bu)", value=float(cp.get("york_bean_opening", 0.0)),
+            min_value=0.0, step=1000.0, format="%.0f", key="york_opening_in",
+        )
+        cp["york_bean_opening"] = york_opening_val
+
+        york_df = pd.DataFrame({
+            "Month":          pm_labels,
+            "To-Arrive (bu)": [float(v) for v in cp["york_bean_arrive"]],
+        })
+        york_edited = st.data_editor(
+            york_df,
+            column_config={
+                "Month":          st.column_config.TextColumn("Month", disabled=True, width="small"),
+                "To-Arrive (bu)": st.column_config.NumberColumn("To-Arrive (bu)", format="%,.0f", min_value=0.0),
+            },
+            hide_index=True, use_container_width=True, key="york_supply_editor", num_rows="fixed",
+        )
+        cp["york_bean_arrive"] = york_edited["To-Arrive (bu)"].tolist()
+
+    # ── Crush schedule ────────────────────────────────────────────────────────
+
+    st.markdown('<div class="sh">Crush Schedule</div>', unsafe_allow_html=True)
+
+    crush_df = pd.DataFrame({
+        "Month":              pm_labels,
+        "Crush Planned (bu)": [float(v) for v in cp["crush_bu"]],
     })
-
-    bean_edited = st.data_editor(
-        bean_input_df,
+    crush_edited = st.data_editor(
+        crush_df,
         column_config={
-            "Month": st.column_config.TextColumn("Month", disabled=True, width="small"),
-            "To-Arrive Priced (bu)": st.column_config.NumberColumn(
-                "To-Arrive Priced", format="%,.0f", min_value=0.0, width="medium"),
-            "To-Arrive Unpriced (bu)": st.column_config.NumberColumn(
-                "To-Arrive Unpriced", format="%,.0f", min_value=0.0, width="medium"),
+            "Month":              st.column_config.TextColumn("Month", disabled=True, width="small"),
             "Crush Planned (bu)": st.column_config.NumberColumn(
-                "Crush Planned", format="%,.0f", min_value=0.0, width="medium"),
+                "Crush Planned (bu)", format="%,.0f", min_value=0.0),
         },
-        hide_index=True, use_container_width=True,
-        key="bean_supply_editor", num_rows="fixed",
+        hide_index=True, use_container_width=True, key="crush_schedule_editor", num_rows="fixed",
     )
+    cp["crush_bu"] = crush_edited["Crush Planned (bu)"].tolist()
 
-    # Write edits back
-    cp["bean_priced"]   = bean_edited["To-Arrive Priced (bu)"].tolist()
-    cp["bean_unpriced"] = bean_edited["To-Arrive Unpriced (bu)"].tolist()
-    cp["crush_bu"]      = bean_edited["Crush Planned (bu)"].tolist()
+    # ── Combined supply balance (cascading) ───────────────────────────────────
 
-    # Cascade bean balance
+    # Combined to-arrive per month (Union Springs + York)
+    comb_arrive    = [cp["us_bean_arrive"][_i] + cp["york_bean_arrive"][_i] for _i in range(_POS_N)]
+    comb_opening_0 = us_opening_val + york_opening_val
+
     b_opening = [0.0] * _POS_N
     b_avail   = [0.0] * _POS_N
     b_closing = [0.0] * _POS_N
-    b_opening[0] = bean_opening_val
+    b_opening[0] = comb_opening_0
     for _i in range(_POS_N):
         if _i > 0:
             b_opening[_i] = b_closing[_i - 1]
-        b_avail[_i]   = b_opening[_i] + cp["bean_priced"][_i] + cp["bean_unpriced"][_i]
+        b_avail[_i]   = b_opening[_i] + comb_arrive[_i]
         b_closing[_i] = max(0.0, b_avail[_i] - cp["crush_bu"][_i])
 
-    # Display bean balance as transposed table (months = columns)
-    bean_bal_df = pd.DataFrame({
-        "Row": ["Opening (bu)", "To-Arrive Priced (bu)", "To-Arrive Unpriced (bu)",
-                "Total Available (bu)", "Crush Planned (bu)", "Closing Inventory (bu)"],
-        **{pm_labels[_i]: [
-            f"{b_opening[_i]:,.0f}",
-            f"{cp['bean_priced'][_i]:,.0f}",
-            f"{cp['bean_unpriced'][_i]:,.0f}",
-            f"{b_avail[_i]:,.0f}",
-            f"{cp['crush_bu'][_i]:,.0f}",
-            f"{b_closing[_i]:,.0f}",
-        ] for _i in range(_POS_N)},
-    })
+    hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels)
+
+    _bal_rows = [
+        ("Opening (bu)",           b_opening,             JPSI_DARK, ""),
+        ("  ↳ Union Springs",      [us_opening_val if _i == 0 else 0.0 for _i in range(_POS_N)],
+         "#6b7280", "font-size:0.85rem;"),
+        ("  ↳ York",               [york_opening_val if _i == 0 else 0.0 for _i in range(_POS_N)],
+         "#6b7280", "font-size:0.85rem;"),
+        ("To-Arrive (bu)",         comb_arrive,           JPSI_DARK, "border-top:1px solid #f0f0f0;"),
+        ("  ↳ Union Springs",      cp["us_bean_arrive"],  "#6b7280", "font-size:0.85rem;"),
+        ("  ↳ York",               cp["york_bean_arrive"], "#6b7280", "font-size:0.85rem;"),
+        ("Total Available (bu)",   b_avail,               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;"),
+        ("Crush Planned (bu)",     cp["crush_bu"],        NEG_RED,   ""),
+        ("Closing Inventory (bu)", b_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
+    ]
 
     rows_html = ""
-    for _, row in bean_bal_df.iterrows():
-        is_closing = row["Row"].startswith("Closing")
-        is_total   = row["Row"].startswith("Total")
-        is_crush   = row["Row"].startswith("Crush")
-        style = ""
-        if is_closing:
-            style = f"font-weight:700;background:#f6f8fa;"
-        elif is_total:
-            style = f"border-top:1px solid #e5e7eb;"
-        tds = "".join(
-            f'<td style="text-align:right;{style}">{v}</td>'
-            for v in [row[lbl] for lbl in pm_labels]
+    for _label, _vals, _color, _extra in _bal_rows:
+        _tds = "".join(
+            f'<td style="text-align:right;{_extra}">{float(v):,.0f}</td>'
+            for v in _vals
         )
-        label_color = NEG_RED if is_crush else (JPSI_BLUE if is_closing else JPSI_DARK)
+        _fw = "400" if _label.startswith("  ↳") else "600"
         rows_html += (
-            f'<tr>'
-            f'<td style="{style}font-weight:600;color:{label_color};">{row["Row"]}</td>'
-            f'{tds}</tr>'
+            f'<tr><td style="{_extra}font-weight:{_fw};color:{_color};">{_label}</td>{_tds}</tr>'
         )
 
-    hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels)
     st.markdown(f"""
 <div class="sheet-wrap"><table>
-  <thead><tr><th>Soybean Supply</th>{hdr}</tr></thead>
+  <thead><tr><th>Combined Supply Balance</th>{hdr}</tr></thead>
   <tbody>{rows_html}</tbody>
 </table></div>""", unsafe_allow_html=True)
 
