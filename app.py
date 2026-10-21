@@ -104,8 +104,9 @@ _CRUSH_POS_DEFAULTS: dict = {
     # Location: York
     "york_bean_opening": 0.0,
     "york_bean_arrive":  [0.0] * _POS_N,
-    # Combined crush schedule
-    "crush_bu": [0.0] * _POS_N,
+    # Crush schedule per plant
+    "us_crush_bu":   [0.0] * _POS_N,
+    "york_crush_bu": [0.0] * _POS_N,
     # Product balances
     "meal_opening_tons": 0.0,
     "meal_sales_tons":   [0.0] * _POS_N,
@@ -134,6 +135,12 @@ def _load_crush_pos() -> dict:
                 p + u for p, u in zip(data.pop("york_bean_priced", [0.0] * _POS_N),
                                        data.pop("york_bean_unpriced", [0.0] * _POS_N))
             ]
+        # Migrate combined crush_bu → per-plant keys
+        if "crush_bu" in data and "us_crush_bu" not in data:
+            data["us_crush_bu"]   = data.pop("crush_bu")
+            data["york_crush_bu"] = [0.0] * _POS_N
+        # Drop the old combined key if it somehow still exists
+        data.pop("crush_bu", None)
         # Fill any missing keys from defaults
         for k, v in _CRUSH_POS_DEFAULTS.items():
             if k not in data:
@@ -1374,24 +1381,29 @@ extruder yield parameters set in the sidebar.
         )
         cp["york_bean_arrive"] = york_edited["To-Arrive (bu)"].tolist()
 
-    # ── Crush schedule ────────────────────────────────────────────────────────
+    # ── Crush schedule (per plant) ────────────────────────────────────────────
 
     st.markdown('<div class="sh">Crush Schedule</div>', unsafe_allow_html=True)
 
     crush_df = pd.DataFrame({
-        "Month":              pm_labels,
-        "Crush Planned (bu)": [float(v) for v in cp["crush_bu"]],
+        "Month":                  pm_labels,
+        "Union Springs (bu)":     [float(v) for v in cp["us_crush_bu"]],
+        "York (bu)":              [float(v) for v in cp["york_crush_bu"]],
     })
     crush_edited = st.data_editor(
         crush_df,
         column_config={
             "Month":              st.column_config.TextColumn("Month", disabled=True, width="small"),
-            "Crush Planned (bu)": st.column_config.NumberColumn(
-                "Crush Planned (bu)", format="%,.0f", min_value=0.0),
+            "Union Springs (bu)": st.column_config.NumberColumn(
+                "Union Springs (bu)", format="%,.0f", min_value=0.0),
+            "York (bu)":          st.column_config.NumberColumn(
+                "York (bu)", format="%,.0f", min_value=0.0),
         },
         hide_index=True, use_container_width=True, key="crush_schedule_editor", num_rows="fixed",
     )
-    cp["crush_bu"] = crush_edited["Crush Planned (bu)"].tolist()
+    cp["us_crush_bu"]   = crush_edited["Union Springs (bu)"].tolist()
+    cp["york_crush_bu"] = crush_edited["York (bu)"].tolist()
+    comb_crush_bu = [cp["us_crush_bu"][_i] + cp["york_crush_bu"][_i] for _i in range(_POS_N)]
 
     # ── Combined supply balance (cascading) ───────────────────────────────────
 
@@ -1407,7 +1419,7 @@ extruder yield parameters set in the sidebar.
         if _i > 0:
             b_opening[_i] = b_closing[_i - 1]
         b_avail[_i]   = b_opening[_i] + comb_arrive[_i]
-        b_closing[_i] = max(0.0, b_avail[_i] - cp["crush_bu"][_i])
+        b_closing[_i] = max(0.0, b_avail[_i] - comb_crush_bu[_i])
 
     hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels)
 
@@ -1421,7 +1433,9 @@ extruder yield parameters set in the sidebar.
         ("  ↳ Union Springs",      cp["us_bean_arrive"],  "#6b7280", "font-size:0.85rem;"),
         ("  ↳ York",               cp["york_bean_arrive"], "#6b7280", "font-size:0.85rem;"),
         ("Total Available (bu)",   b_avail,               JPSI_DARK, "border-top:2px solid #e5e7eb;font-weight:700;"),
-        ("Crush Planned (bu)",     cp["crush_bu"],        NEG_RED,   ""),
+        ("Crush Planned (bu)",     comb_crush_bu,         NEG_RED,   ""),
+        ("  ↳ Union Springs",      cp["us_crush_bu"],     "#6b7280", "font-size:0.85rem;"),
+        ("  ↳ York",               cp["york_crush_bu"],   "#6b7280", "font-size:0.85rem;"),
         ("Closing Inventory (bu)", b_closing,             JPSI_BLUE, "font-weight:700;background:#f6f8fa;"),
     ]
 
@@ -1447,11 +1461,11 @@ extruder yield parameters set in the sidebar.
     st.markdown("<hr>", unsafe_allow_html=True)
     st.markdown('<div class="sh">Crush Production (Extruder Yields)</div>', unsafe_allow_html=True)
 
-    meal_produced = [bu * ext_meal_tons for bu in cp["crush_bu"]]  # tons
-    oil_produced  = [bu * ext_oil_lbs   for bu in cp["crush_bu"]]  # lbs
+    meal_produced = [bu * ext_meal_tons for bu in comb_crush_bu]  # tons
+    oil_produced  = [bu * ext_oil_lbs   for bu in comb_crush_bu]  # lbs
 
     prod_rows_html = ""
-    for _lbl, _bu, _mt, _ol in zip(pm_labels, cp["crush_bu"], meal_produced, oil_produced):
+    for _lbl, _bu, _mt, _ol in zip(pm_labels, comb_crush_bu, meal_produced, oil_produced):
         prod_rows_html += (
             f"<tr>"
             f"<td style='font-weight:600;'>{_lbl}</td>"
@@ -1621,10 +1635,10 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
 
     pnl_rows_html = ""
     pnl_total_gpm = 0.0
-    any_crush = any(v > 0 for v in cp["crush_bu"])
+    any_crush = any(v > 0 for v in comb_crush_bu)
     if any_crush:
         for _i in range(_POS_N):
-            _bu = cp["crush_bu"][_i]
+            _bu = comb_crush_bu[_i]
             if _bu <= 0:
                 continue
             _meal_rev  = meal_produced[_i] * front.ZM
@@ -1646,10 +1660,10 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
                 f"</tr>"
             )
         # Totals row
-        total_bu   = sum(v for v in cp["crush_bu"] if v > 0)
-        total_meal = sum(mt * front.ZM for mt, bu in zip(meal_produced, cp["crush_bu"]) if bu > 0)
-        total_oil  = sum(ol * (front.ZL / 100.0) for ol, bu in zip(oil_produced, cp["crush_bu"]) if bu > 0)
-        total_bean = sum(bu * (front.ZS / 100.0) for bu in cp["crush_bu"] if bu > 0)
+        total_bu   = sum(v for v in comb_crush_bu if v > 0)
+        total_meal = sum(mt * front.ZM for mt, bu in zip(meal_produced, comb_crush_bu) if bu > 0)
+        total_oil  = sum(ol * (front.ZL / 100.0) for ol, bu in zip(oil_produced, comb_crush_bu) if bu > 0)
+        total_bean = sum(bu * (front.ZS / 100.0) for bu in comb_crush_bu if bu > 0)
         total_color = POS_GREEN if pnl_total_gpm >= 0 else NEG_RED
         pnl_rows_html += (
             f"<tr style='font-weight:700;border-top:2px solid #e5e7eb;background:#f6f8fa;'>"
@@ -1739,7 +1753,7 @@ Gal ≈ lbs ÷ 7.524 (crude soy oil density)
     _zm_ton = _zm_c * ZM_TONS
     _zl_lbs = _zl_c * ZL_LBS
 
-    _total_crush_bu  = sum(cp["crush_bu"])
+    _total_crush_bu  = sum(comb_crush_bu)
     _total_meal_tons = sum(meal_produced)
     _total_oil_lbs   = sum(oil_produced)
 
