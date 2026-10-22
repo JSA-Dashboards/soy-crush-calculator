@@ -99,10 +99,12 @@ def _pos_month_labels(n: int = _POS_N) -> list[str]:
 
 _CRUSH_POS_DEFAULTS: dict = {
     # Location: Union Springs
-    "us_bean_opening": 0.0,
-    "us_bean_arrive":  [0.0] * _POS_N,
+    "us_bean_opening":  0.0,
+    "us_capacity":      1_000_000.0,
+    "us_bean_arrive":   [0.0] * _POS_N,
     # Location: York
     "york_bean_opening": 0.0,
+    "york_capacity":     350_000.0,
     "york_bean_arrive":  [0.0] * _POS_N,
     # Crush schedule per plant
     "us_crush_bu":   [0.0] * _POS_N,
@@ -1511,6 +1513,11 @@ extruder yield parameters set in the sidebar.
             step=1000.0, format="%.0f", key="us_opening_in",
         )
         cp["us_bean_opening"] = us_opening_val
+        us_cap_val = st.number_input(
+            "Storage capacity (bu)", value=float(cp.get("us_capacity", 1_000_000.0)),
+            step=10_000.0, format="%.0f", key="us_capacity_in",
+        )
+        cp["us_capacity"] = us_cap_val
 
         us_df = pd.DataFrame({
             "Month":          pm_labels[:n_show],
@@ -1539,6 +1546,11 @@ extruder yield parameters set in the sidebar.
             step=1000.0, format="%.0f", key="york_opening_in",
         )
         cp["york_bean_opening"] = york_opening_val
+        york_cap_val = st.number_input(
+            "Storage capacity (bu)", value=float(cp.get("york_capacity", 350_000.0)),
+            step=10_000.0, format="%.0f", key="york_capacity_in",
+        )
+        cp["york_capacity"] = york_cap_val
 
         york_df = pd.DataFrame({
             "Month":          pm_labels[:n_show],
@@ -1578,33 +1590,52 @@ extruder yield parameters set in the sidebar.
     cp["york_crush_bu"] = crush_edited["York (bu)"].tolist() + cp["york_crush_bu"][n_show:]
     comb_crush_bu = [cp["us_crush_bu"][_i] + cp["york_crush_bu"][_i] for _i in range(_POS_N)]
 
-    # ── Combined supply balance (cascading) ───────────────────────────────────
+    # ── Per-location supply cascades ─────────────────────────────────────────
 
-    # Combined to-arrive per month (Union Springs + York)
-    comb_arrive    = [cp["us_bean_arrive"][_i] + cp["york_bean_arrive"][_i] for _i in range(_POS_N)]
-    comb_opening_0 = us_opening_val + york_opening_val
+    comb_arrive = [cp["us_bean_arrive"][_i] + cp["york_bean_arrive"][_i] for _i in range(_POS_N)]
 
-    b_opening = [0.0] * _POS_N
-    b_avail   = [0.0] * _POS_N
-    b_closing = [0.0] * _POS_N
-    b_opening[0] = comb_opening_0
+    us_open_arr    = [0.0] * _POS_N
+    us_closing_arr = [0.0] * _POS_N
+    york_open_arr    = [0.0] * _POS_N
+    york_closing_arr = [0.0] * _POS_N
+    us_open_arr[0]   = us_opening_val
+    york_open_arr[0] = york_opening_val
     for _i in range(_POS_N):
         if _i > 0:
-            b_opening[_i] = b_closing[_i - 1]
-        b_avail[_i]   = b_opening[_i] + comb_arrive[_i]
-        b_closing[_i] = b_avail[_i] - comb_crush_bu[_i]
+            us_open_arr[_i]   = us_closing_arr[_i - 1]
+            york_open_arr[_i] = york_closing_arr[_i - 1]
+        us_closing_arr[_i]   = us_open_arr[_i]   + cp["us_bean_arrive"][_i]   - cp["us_crush_bu"][_i]
+        york_closing_arr[_i] = york_open_arr[_i]  + cp["york_bean_arrive"][_i] - cp["york_crush_bu"][_i]
+
+    b_opening = [us_open_arr[_i] + york_open_arr[_i] for _i in range(_POS_N)]
+    b_avail   = [b_opening[_i] + comb_arrive[_i]     for _i in range(_POS_N)]
+    b_closing = [us_closing_arr[_i] + york_closing_arr[_i] for _i in range(_POS_N)]
 
     hdr = "".join(f"<th style='text-align:right;'>{lbl}</th>" for lbl in pm_labels[:n_show])
 
     def _sc(v):
         return POS_GREEN if float(v) >= 0 else NEG_RED
 
+    def _cap_color_us(v):
+        cap = cp.get("us_capacity", 1_000_000.0)
+        fv = float(v)
+        if fv < 0:
+            return NEG_RED
+        pct = fv / cap if cap > 0 else 0.0
+        return NEG_RED if pct > 1.0 else ("#e8833a" if pct > 0.8 else POS_GREEN)
+
+    def _cap_color_york(v):
+        cap = cp.get("york_capacity", 350_000.0)
+        fv = float(v)
+        if fv < 0:
+            return NEG_RED
+        pct = fv / cap if cap > 0 else 0.0
+        return NEG_RED if pct > 1.0 else ("#e8833a" if pct > 0.8 else POS_GREEN)
+
     _bal_rows = [
         ("Opening (bu)",           b_opening[:n_show],             JPSI_DARK, "", None),
-        ("  ↳ Union Springs",      [us_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
-         "#6b7280", "font-size:0.85rem;", None),
-        ("  ↳ York",               [york_opening_val if _i == 0 else 0.0 for _i in range(n_show)],
-         "#6b7280", "font-size:0.85rem;", None),
+        ("  ↳ Union Springs",      us_open_arr[:n_show],           "#6b7280", "font-size:0.85rem;", None),
+        ("  ↳ York",               york_open_arr[:n_show],         "#6b7280", "font-size:0.85rem;", None),
         ("To-Arrive (bu)",         comb_arrive[:n_show],           JPSI_DARK, "border-top:1px solid #f0f0f0;", None),
         ("  ↳ Union Springs",      cp["us_bean_arrive"][:n_show],  "#6b7280", "font-size:0.85rem;", None),
         ("  ↳ York",               cp["york_bean_arrive"][:n_show], "#6b7280", "font-size:0.85rem;", None),
@@ -1613,6 +1644,8 @@ extruder yield parameters set in the sidebar.
         ("  ↳ Union Springs",      cp["us_crush_bu"][:n_show],     "#6b7280", "font-size:0.85rem;", None),
         ("  ↳ York",               cp["york_crush_bu"][:n_show],   "#6b7280", "font-size:0.85rem;", None),
         ("Closing Inventory (bu)", b_closing[:n_show],             JPSI_DARK, "font-weight:700;background:#f6f8fa;", _sc),
+        ("  ↳ Union Springs",      us_closing_arr[:n_show],        "#6b7280", "font-size:0.85rem;background:#f6f8fa;", _cap_color_us),
+        ("  ↳ York",               york_closing_arr[:n_show],      "#6b7280", "font-size:0.85rem;background:#f6f8fa;", _cap_color_york),
     ]
 
     rows_html = ""
