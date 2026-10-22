@@ -3,3 +3,5 @@ pandas>=2.0
 plotly>=5.20
 requests>=2.31
 anthropic>=0.30
+snowflake-connector-python>=3.0
+cryptography>=41.0

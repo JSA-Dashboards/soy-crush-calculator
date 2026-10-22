@@ -119,7 +119,8 @@ _CRUSH_POS_DEFAULTS: dict = {
 
 def _load_crush_pos() -> dict:
     try:
-        data = json.loads(_CRUSH_POS_FILE.read_text())
+        sf = _sf_load_crush_pos()
+        data = sf if sf is not None else json.loads(_CRUSH_POS_FILE.read_text())
         # Migrate old single-location format → two-location format
         if "bean_opening" in data and "us_bean_opening" not in data:
             data["us_bean_opening"] = data.pop("bean_opening", 0.0)
@@ -158,6 +159,95 @@ def _load_crush_pos() -> dict:
 def _save_crush_pos(data: dict) -> None:
     try:
         _CRUSH_POS_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+    _sf_save_crush_pos(data)
+
+
+# ── Snowflake persistence ─────────────────────────────────────────────────────
+
+def _sf_secret(name: str) -> str:
+    try:
+        return st.secrets.get(name, "") or ""
+    except Exception:
+        return ""
+
+
+def _sf_private_key():
+    pem  = _sf_secret("SNOWFLAKE_PRIVATE_KEY")
+    path = _sf_secret("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if not pem and not path:
+        return None
+    from cryptography.hazmat.primitives import serialization
+    raw = open(path, "rb").read() if path else pem.replace("\\n", "\n").encode()
+    pwd = _sf_secret("SNOWFLAKE_PRIVATE_KEY_PWD") or None
+    key = serialization.load_pem_private_key(raw, password=pwd.encode() if pwd else None)
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def _sf_connect():
+    import snowflake.connector
+    kw = dict(
+        account=_sf_secret("SNOWFLAKE_ACCOUNT"),
+        user=_sf_secret("SNOWFLAKE_USER"),
+        role=_sf_secret("SNOWFLAKE_ROLE") or None,
+        warehouse=_sf_secret("SNOWFLAKE_WAREHOUSE") or None,
+        database=_sf_secret("SNOWFLAKE_DATABASE") or "JSA",
+        schema="PUBLIC",
+        login_timeout=30,
+    )
+    pkey = _sf_private_key()
+    if pkey is not None:
+        kw["private_key"] = pkey
+    else:
+        kw["password"] = _sf_secret("SNOWFLAKE_PASSWORD")
+    return snowflake.connector.connect(**kw)
+
+
+_SF_DDL = (
+    "CREATE TABLE IF NOT EXISTS JSA.PUBLIC.CRUSH_POSITION "
+    "(key VARCHAR(50) NOT NULL, data VARCHAR(16777216), "
+    "updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP())"
+)
+
+
+def _sf_load_crush_pos() -> dict | None:
+    if not _sf_secret("SNOWFLAKE_ACCOUNT"):
+        return None
+    try:
+        conn = _sf_connect()
+        cur  = conn.cursor()
+        cur.execute(_SF_DDL)
+        cur.execute(
+            "SELECT data FROM JSA.PUBLIC.CRUSH_POSITION WHERE key = 'default' LIMIT 1"
+        )
+        row = cur.fetchone()
+        conn.close()
+        return json.loads(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _sf_save_crush_pos(data: dict) -> None:
+    if not _sf_secret("SNOWFLAKE_ACCOUNT"):
+        return
+    try:
+        conn = _sf_connect()
+        cur  = conn.cursor()
+        cur.execute(_SF_DDL)
+        cur.execute(
+            "MERGE INTO JSA.PUBLIC.CRUSH_POSITION AS tgt "
+            "USING (SELECT 'default' AS key, %s AS data) AS src ON tgt.key = src.key "
+            "WHEN MATCHED THEN UPDATE SET data = src.data, updated_at = CURRENT_TIMESTAMP() "
+            "WHEN NOT MATCHED THEN INSERT (key, data, updated_at) "
+            "VALUES (src.key, src.data, CURRENT_TIMESTAMP())",
+            (json.dumps(data),),
+        )
+        conn.close()
     except Exception:
         pass
 
