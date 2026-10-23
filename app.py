@@ -2478,6 +2478,33 @@ with tab_territory:
     _dt_comm_cfg  = _DT_ALL_COMMS[_dt_comm]
     _dt_mlist     = list(_dt_comm_cfg.keys())
 
+    # ── Temporary debug (remove once data confirmed working) ──────────────────
+    with st.expander("🔧 Debug — NASS cache connection test", expanded=False):
+        try:
+            _dbg_conn = _sf_connect()
+            _dbg_cur  = _dbg_conn.cursor()
+            _dbg_cur.execute("SELECT COUNT(*) FROM JSA.NASS_CACHE.nass_cache")
+            _dbg_cnt = _dbg_cur.fetchone()
+            st.success(f"Connected. Rows in JSA.NASS_CACHE.nass_cache: {_dbg_cnt[0]:,}")
+            # Show sample cache keys
+            _dbg_cur.execute("SELECT cache_key, LEFT(data::varchar, 60) FROM JSA.NASS_CACHE.nass_cache LIMIT 3")
+            _dbg_rows = _dbg_cur.fetchall()
+            st.write("Sample rows:", _dbg_rows)
+            # Show the key we're generating for corn planted acres
+            import hashlib as _hs, json as _js
+            _dbg_params = {"agg_level_desc": "STATE", "commodity_desc": "CORN",
+                           "domain_desc": "TOTAL", "freq_desc": "ANNUAL",
+                           "source_desc": "SURVEY", "statisticcat_desc": "AREA PLANTED",
+                           "unit_desc": "ACRES", "year__GE": "1980"}
+            _dbg_canon = _js.dumps(_dbg_params, sort_keys=True, separators=(",",":"))
+            _dbg_key = _hs.sha256(f"api_GET|{_dbg_canon}".encode()).hexdigest()
+            st.code(f"Expected key for Corn Planted Acres:\n{_dbg_key}")
+            _dbg_cur.execute("SELECT COUNT(*) FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s", (_dbg_key,))
+            st.write("Rows matching that key:", _dbg_cur.fetchone()[0])
+            _dbg_conn.close()
+        except Exception as _dbg_e:
+            st.error(f"Connection/query error: {_dbg_e}")
+
     # ── Color palette ─────────────────────────────────────────────────────────
     _DT_COLORS = {
         "Corn":                "#d97706",
