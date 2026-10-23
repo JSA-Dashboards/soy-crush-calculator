@@ -87,12 +87,61 @@ def view_cfg(metric: str, change_view: str) -> dict:
     }[metric]
 
 
-def _base_layout(title: str) -> dict:
+def _base_layout(title: str, size: int = 15, top: int = 50) -> dict:
     return dict(paper_bgcolor=DARK, plot_bgcolor=SURFACE, font=dict(color=TEXT, family="Arial"),
-                title=dict(text=title, font=dict(size=15, color=ACCENT)), margin=dict(l=0, r=0, t=50, b=0))
+                title=dict(text=title, font=dict(size=size, color=ACCENT)), margin=dict(l=0, r=0, t=top, b=0))
 
 
-def map_height(geo: dict, min_h: int = 420, max_h: int = 820) -> int:
+# Du Mond Grain plants, drawn as a star on every map. Union Springs is the 5083 White Road address;
+# York is the hamlet of York (Livingston County), as no street address is published for that site.
+FACILITIES = (
+    {"name": "Union Springs", "lat": 42.8639, "lon": -76.6093, "lab_lon": -76.55, "lab_lat": 43.95},
+    {"name": "York", "lat": 42.8673, "lon": -77.8867, "lab_lon": -78.0, "lab_lat": 43.95},
+)
+_STAR_COLOR, _STAR_EDGE = "#fbbf24", "#7c2d12"
+# District labels default to the district centroid; these two sit beside the stars, so they are placed by hand.
+LABEL_ANCHORS = {"Western": (-78.55, 43.08), "Central": (-75.5, 43.0)}
+
+
+def _repel(lon: float, lat: float, r: float):
+    """Move a label out to r degrees from any facility star so the star never covers it."""
+    k = math.cos(math.radians(43.0))
+    for fac in FACILITIES:
+        dx, dy = (lon - fac["lon"]) * k, lat - fac["lat"]
+        d = math.hypot(dx, dy)
+        if d < r:
+            if d < 1e-6:
+                dx, dy, d = 0.0, 1.0, 1.0
+            lon, lat = fac["lon"] + dx * r / d / k, fac["lat"] + dy * r / d
+    return lon, lat
+
+
+def add_facilities(fig) -> None:
+    """Du Mond Grain facilities: a large star, with its name on a leader line out over Lake Ontario so it
+    never covers map data. Always drawn on top of the map."""
+    lx, ly = [], []
+    for f in FACILITIES:
+        lx += [f["lon"], f["lab_lon"], None]
+        ly += [f["lat"], f["lab_lat"] - 0.1, None]
+    fig.add_trace(go.Scattergeo(lon=lx, lat=ly, mode="lines", line=dict(color=_STAR_EDGE, width=2),
+                                showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scattergeo(
+        lon=[f["lab_lon"] for f in FACILITIES], lat=[f["lab_lat"] for f in FACILITIES], mode="text",
+        text=[f["name"] for f in FACILITIES], textposition="middle center",
+        textfont=dict(size=15, color=_STAR_EDGE, family="Arial Black"), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scattergeo(
+        lon=[f["lon"] for f in FACILITIES], lat=[f["lat"] for f in FACILITIES], mode="markers",
+        text=[f["name"] for f in FACILITIES],
+        marker=dict(symbol="star", size=30, color=_STAR_COLOR, line=dict(color=_STAR_EDGE, width=2.5)),
+        name="Du Mond Grain facility", showlegend=True,
+        hovertemplate="<b>Du Mond Grain</b><br>%{text}<extra></extra>"))
+    fig.update_layout(legend=dict(x=0.01, y=0.985, xanchor="left", yanchor="top", bgcolor="rgba(255,255,255,0.9)",
+                                  bordercolor=BORDER, borderwidth=1, font=dict(size=13, color=TEXT)))
+
+
+def geo_view(geo: dict, pad_lon: float = 0.2, pad_lat: float = 0.12) -> dict:
+    """Explicit map frame around New York: lon/lat ranges and the height/width ratio of that frame in a
+    Mercator map. Used for both the axes and the figure height, so the map fills its frame."""
     lats, lons = [], []
 
     def walk(o):
@@ -105,21 +154,32 @@ def map_height(geo: dict, min_h: int = 420, max_h: int = 820) -> int:
                     walk(i)
     for f in geo["counties"]["features"]:
         walk(f["geometry"]["coordinates"])
-    if not lats:
-        return 620
-    adj_lon = (max(lons) - min(lons)) * math.cos(math.radians((max(lats) + min(lats)) / 2))
-    if adj_lon == 0:
-        return 620
-    return max(min_h, min(max_h, int(900 * ((max(lats) - min(lats)) / adj_lon) * 1.05)))
+    lon_r = [min(lons) - pad_lon, max(lons) + pad_lon]
+    lat_r = [min(lats) - pad_lat, max(lats) + pad_lat]
+
+    def merc(lat):
+        return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+    ratio = (merc(lat_r[1]) - merc(lat_r[0])) / math.radians(lon_r[1] - lon_r[0])
+    return {"lon": lon_r, "lat": lat_r, "ratio": ratio}
+
+
+def map_height(geo: dict, width: int = 960, top: int = 60) -> int:
+    return int(width * geo_view(geo)["ratio"]) + top
+
+
+def frame_map(fig, geo: dict) -> None:
+    v = geo_view(geo)
+    fig.update_geos(projection_type="mercator", lonaxis_range=v["lon"], lataxis_range=v["lat"],
+                    visible=False, bgcolor=DARK, landcolor=LAND, showframe=False, showlakes=False)
 
 
 def place_labels(fig, fips_list, values, centroids, label_fn):
     areas = [centroids[f][2] for f in fips_list if f in centroids]
     if areas:
         avg_area = float(np.mean(areas))
-        size = int(np.clip(9 + np.log(max(avg_area, 0.01) / 0.05) * 2.0, 9, 15))
+        size = int(np.clip(13 + np.log(max(avg_area, 0.01) / 0.05) * 2.0, 13, 19))
     else:
-        avg_area, size = 0.1, 10
+        avg_area, size = 0.1, 13
     cands = []
     for fips, val in zip(fips_list, values):
         label = label_fn(val)
@@ -127,11 +187,12 @@ def place_labels(fig, fips_list, values, centroids, label_fn):
             cx, cy, area = centroids[fips]
             cands.append((area, cx, cy, label))
     cands.sort(reverse=True)
-    min_sep = float(np.clip(0.15 + avg_area * 0.8, 0.20, 0.45))
+    min_sep = float(np.clip(0.15 + avg_area * 0.8, 0.20, 0.45)) * 1.15
     placed, lons, lats, texts = [], [], [], []
     for area, cx, cy, label in cands:
         if not any((cx - px) ** 2 + (cy - py) ** 2 < min_sep ** 2 for px, py in placed):
             placed.append((cx, cy))
+            cx, cy = _repel(cx, cy, 0.2)
             lons.append(cx)
             lats.append(cy)
             texts.append(label)
@@ -169,7 +230,7 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
         sfx = " (Est)" if est.get(f) else ""
         hover.append(f"{lbl}{sfx}: {cfg['label_fn'](v)}{cfg['hover_sfx']}" if v else f"{lbl}: No data")
     z_min, z_max = _z_range(cfg, [v for v in z if v is not None])
-    line = dict(color="#a0b5c8", width=0.8)
+    line = dict(color="#8fa6bb", width=1.1)
     fig = go.Figure()
     fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
                                 colorscale=[[0, PANEL], [1, PANEL]], showscale=False,
@@ -177,19 +238,23 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
     fig.add_trace(go.Choropleth(
         geojson=counties, featureidkey="id", locations=all_fips, z=z, colorscale=cfg["cscale"],
         zmin=z_min, zmax=z_max, marker=dict(line=line), text=hover, hovertemplate="%{text}<extra></extra>",
-        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT)), tickfont=dict(color=TEXT))))
+        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT, size=13)), tickfont=dict(color=TEXT, size=12),
+                      thickness=22, len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom", bgcolor="rgba(255,255,255,0.85)")))
     cents = geo["centroids"]
     est_fips = [f for f in all_fips if est.get(f) and f in cents]
     if est_fips:
-        fig.add_trace(go.Scattergeo(lon=[cents[f][0] for f in est_fips], lat=[cents[f][1] for f in est_fips],
+        pts = [_repel(cents[f][0], cents[f][1], 0.2) for f in est_fips]
+        fig.add_trace(go.Scattergeo(lon=[p[0] for p in pts], lat=[p[1] for p in pts],
                                     mode="text", text=["Est"] * len(est_fips),
-                                    textfont=dict(color="#374151", size=7, family="Arial Bold"),
+                                    textfont=dict(color="#374151", size=11, family="Arial Black"),
                                     showlegend=False, hoverinfo="skip"))
     rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and not est.get(f)]
     place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"])
+    add_facilities(fig)
     sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
-    fig.update_geos(fitbounds="locations", visible=False, bgcolor=DARK, landcolor=LAND)
-    fig.update_layout(**_base_layout(f"NASS {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>"),
+    frame_map(fig, geo)
+    fig.update_layout(**_base_layout(f"NASS {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>",
+                                     18, 64),
                       height=map_height(geo))
     return fig
 
@@ -230,14 +295,15 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
     fig.add_trace(go.Choropleth(
         geojson=geo["districts"], featureidkey="properties.District", locations=districts, z=z,
         colorscale=cfg["cscale"], zmin=z_min, zmax=z_max, marker=dict(line=dict(color=BORDER, width=0.3)),
-        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT)), tickfont=dict(color=TEXT)),
+        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT, size=13)), tickfont=dict(color=TEXT, size=12),
+                      thickness=22, len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom", bgcolor="rgba(255,255,255,0.85)"),
         text=[hover(d, v) for d, v in zip(districts, z)], hovertemplate="%{text}<extra></extra>"))
     counties = geo["counties"]
     cfips = [f["id"] for f in counties["features"]]
     fig.add_trace(go.Choropleth(
         geojson=counties, featureidkey="id", locations=cfips, z=[0] * len(cfips),
         colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]], showscale=False,
-        marker=dict(line=dict(color="rgba(90,90,90,0.55)", width=0.5)), hoverinfo="skip"))
+        marker=dict(line=dict(color="rgba(90,90,90,0.6)", width=0.8)), hoverinfo="skip"))
     xs, ys, lons, lats, texts = [], [], [], [], []
     for f in dfeats:
         for ring in _exteriors(f["geometry"]):
@@ -251,15 +317,17 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
             texts.append(f"{d.upper()}{flag}<br>{'+' if dv >= 0 else ''}{dv:.1f}%")
         else:
             texts.append(f"{d.upper()}{flag}<br>{rv_s}")
-        lons.append(f["properties"]["centroid_lon"])
-        lats.append(f["properties"]["centroid_lat"])
-    fig.add_trace(go.Scattergeo(lon=xs, lat=ys, mode="lines", line=dict(color="white", width=1.8),
+        lon, lat = LABEL_ANCHORS.get(d) or _repel(f["properties"]["centroid_lon"], f["properties"]["centroid_lat"], 0.42)
+        lons.append(lon)
+        lats.append(lat)
+    fig.add_trace(go.Scattergeo(lon=xs, lat=ys, mode="lines", line=dict(color="white", width=3.2),
                                 showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scattergeo(lon=lons, lat=lats, mode="text", text=texts,
-                                textfont=dict(color="black", size=9, family="Arial Black"),
+                                textfont=dict(color="black", size=14, family="Arial Black"),
                                 showlegend=False, hoverinfo="skip"))
-    fig.update_geos(fitbounds="locations", visible=False, bgcolor=DARK, landcolor=LAND, showframe=False)
-    fig.update_layout(**{**_base_layout(f"NASS {year} {crop} — {view_label} | New York AG Districts"),
+    add_facilities(fig)
+    frame_map(fig, geo)
+    fig.update_layout(**{**_base_layout(f"NASS {year} {crop} — {view_label} | New York AG Districts", 18, 56),
                          "height": map_height(geo), "geo": dict(showlakes=False)})
     return fig
 

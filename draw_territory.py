@@ -265,6 +265,13 @@ def _nass_tab() -> None:
         if stat in nd.ESTIMABLE and not is_fc:
             comp_df = cobj.completed(stat, year, adj)
             n_est = int(comp_df["is_estimated"].sum()) if not comp_df.empty else 0
+        fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d)
+        if fig is None:
+            st.info("ASD district map not available for this selection.")
+        else:
+            fig.update_layout(dragmode=False)
+            st.plotly_chart(fig, use_container_width=True, key="ny_district_map",
+                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
         if not cur_df.empty:
             t = cur_df.copy()
             t["ASD"] = t["District"].map(codes).fillna("")
@@ -279,11 +286,15 @@ def _nass_tab() -> None:
                 t = t.merge(e, on="District", how="left")
                 t["Est. Counties"] = t["Est. Counties"].fillna(0).astype(int).apply(lambda n: str(n) if n else "—")
                 cols.append("Est. Counties")
-            tc, mc = st.columns([1.4, 2.4])
+            st.markdown(f"<p style='color:#5f7267;font-size:0.82rem;font-weight:600;margin:6px 0 4px 0;'>"
+                        f"New York {year} {crop} — by ASD district</p>", unsafe_allow_html=True)
+            tc, kc = st.columns([2.4, 1])
             with tc:
-                st.markdown(f"<p style='color:#5f7267;font-size:0.78rem;margin:0 0 4px 0;'>New York {year} {crop}</p>",
-                            unsafe_allow_html=True)
                 st.dataframe(t[cols], use_container_width=True, hide_index=True)
+            with kc:
+                m1, m2 = st.columns(2)
+                m1.metric("State Avg" if ratio else "State Total", _fmt_val(metric, tot))
+                m2.metric("Districts", f"{len(t)}")
                 if n_est > 0:
                     st.caption("Est = some counties not published by NASS. Values are estimated from each county's "
                                "historical share of state output, adjusted for current district performance, and "
@@ -291,19 +302,6 @@ def _nass_tab() -> None:
                 if not ratio and not is_fc and abs_val and abs(tot / abs_val - 1) > 0.01:
                     st.caption(f"District total ({_fmt_val(metric, tot)}) differs from the NASS state figure "
                                f"({_fmt_val(metric, abs_val)}): NASS publishes its county and state estimates separately.")
-                m1, m2 = st.columns(2)
-                m1.metric("State Avg" if ratio else "State Total", _fmt_val(metric, tot))
-                m2.metric("Districts", f"{len(t)}")
-        else:
-            mc = st.container()
-        with mc:
-            fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d)
-            if fig is None:
-                st.info("ASD district map not available for this selection.")
-            else:
-                fig.update_layout(dragmode=False)
-                st.plotly_chart(fig, use_container_width=True, key="ny_district_map",
-                                config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
     else:
         cdf = cobj.county_view(metric, year, change, comp, adj)
         fig = nf.county_fig(cdf, geo, crop, year, metric, change)
