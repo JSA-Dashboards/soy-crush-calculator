@@ -14,6 +14,7 @@ Massive prices:  ZS → ¢/bu   ZM → $/ton   ZL → ¢/lb
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import date, timedelta
@@ -250,6 +251,71 @@ def _sf_save_crush_pos(data: dict) -> None:
         conn.close()
     except Exception:
         pass
+
+
+# ── NASS cache helpers (Draw Territory) ──────────────────────────────────────
+
+def _nass_cache_key(params: dict) -> str:
+    ignored = {"key", "format"}
+    clean = {k: str(v) for k, v in params.items() if k not in ignored}
+    canon = json.dumps(clean, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(f"api_GET|{canon}".encode()).hexdigest()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _dt_fetch_ny(
+    commodity_desc: str,
+    statisticcat_desc: str,
+    unit_desc: str,
+    reference_period_desc: str = "YEAR",
+    year__GE: str = "1990",
+    util_practice_desc: str = "",
+    class_desc: str = "",
+) -> pd.DataFrame:
+    """Fetch NY state data from JSA.NASS_CACHE. Returns year/value DataFrame."""
+    params: dict = {
+        "commodity_desc": commodity_desc,
+        "statisticcat_desc": statisticcat_desc,
+        "unit_desc": unit_desc,
+        "reference_period_desc": reference_period_desc,
+        "source_desc": "SURVEY",
+        "agg_level_desc": "STATE",
+        "year__GE": year__GE,
+    }
+    if util_practice_desc:
+        params["util_practice_desc"] = util_practice_desc
+    if class_desc:
+        params["class_desc"] = class_desc
+    ck = _nass_cache_key(params)
+    try:
+        conn = _sf_connect()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT response_json FROM JSA.NASS_CACHE WHERE cache_key = %s LIMIT 1",
+            (ck,),
+        )
+        row = cur.fetchone()
+        conn.close()
+    except Exception:
+        return pd.DataFrame()
+    if not row:
+        return pd.DataFrame()
+    try:
+        records = json.loads(row[0])
+        df = pd.DataFrame(records)
+        if "state_alpha" in df.columns:
+            df = df[df["state_alpha"] == "NY"]
+        df["year"] = pd.to_numeric(df.get("year", pd.Series(dtype=float)), errors="coerce")
+        df["value"] = pd.to_numeric(
+            df.get("Value", pd.Series(dtype=str)).astype(str).str.replace(",", ""),
+            errors="coerce",
+        )
+        return (
+            df.dropna(subset=["year", "value"])[["year", "value"]]
+            .sort_values("year").reset_index(drop=True)
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 def _extract_ch_report_image(img_bytes: bytes, mime: str) -> dict:
@@ -583,12 +649,13 @@ front = aligned.iloc[0]
 # TABS
 # ═════════════════════════════════════════════════════════════════════════════
 
-tab_live, tab_seasonal, tab_curve, tab_hedge, tab_position = st.tabs([
+tab_live, tab_seasonal, tab_curve, tab_hedge, tab_position, tab_territory = st.tabs([
     "📊  Live Summary",
     "📅  Seasonal History",
     "🌊  Crush Curve",
     "🔧  Hedge Converter",
     "📋  Position",
+    "🗺️  Draw Territory",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2152,4 +2219,180 @@ Enter crush quantities above to see exposure totals.
         "Download saves a backup to your computer. "
         "On Streamlit Cloud the file resets on each reboot — "
         "use **Restore saved position from file** at the top to reload it."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — DRAW TERRITORY (New York)
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab_territory:
+    st.markdown(f"""
+<div style="background:linear-gradient(135deg,{JPSI_DARK} 0%,#2a4a2a 100%);
+     border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+  <div style="font-size:1.2rem;font-weight:700;color:#fff;">🗺️ Draw Territory — New York State</div>
+  <div style="font-size:0.875rem;color:#ccc;margin-top:4px;">
+    USDA NASS crop production + livestock inventory for the plant catchment area.
+    Sourced from the JSA shared NASS cache (JSA.NASS_CACHE).
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Crop production ───────────────────────────────────────────────────────
+
+    st.markdown('<div class="sh">Crop Production</div>', unsafe_allow_html=True)
+
+    _dt_crop = st.radio(
+        "Crop", ["Corn", "Soybeans"],
+        horizontal=True, key="dt_crop", label_visibility="collapsed",
+    )
+
+    _CORN_COLOR = "#d97706"
+    _SOY_COLOR  = JPSI_BLUE
+
+    if _dt_crop == "Corn":
+        _dt_planted  = _dt_fetch_ny("CORN", "AREA PLANTED",  "ACRES")
+        _dt_harvest  = _dt_fetch_ny("CORN", "AREA HARVESTED","ACRES",     util_practice_desc="GRAIN")
+        _dt_yield    = _dt_fetch_ny("CORN", "YIELD",         "BU / ACRE", util_practice_desc="GRAIN")
+        _dt_prod     = _dt_fetch_ny("CORN", "PRODUCTION",    "BU",        util_practice_desc="GRAIN")
+        _crop_color  = _CORN_COLOR
+    else:
+        _dt_planted  = _dt_fetch_ny("SOYBEANS", "AREA PLANTED",  "ACRES")
+        _dt_harvest  = _dt_fetch_ny("SOYBEANS", "AREA HARVESTED","ACRES")
+        _dt_yield    = _dt_fetch_ny("SOYBEANS", "YIELD",         "BU / ACRE")
+        _dt_prod     = _dt_fetch_ny("SOYBEANS", "PRODUCTION",    "BU")
+        _crop_color  = _SOY_COLOR
+
+    # ── Summary stat tiles ────────────────────────────────────────────────────
+    _dt_sc = st.columns(4)
+    for _ci, (_lbl, _df) in enumerate([
+        ("Planted Acres",   _dt_planted),
+        ("Harvested Acres", _dt_harvest),
+        ("Yield (Bu/Ac)",   _dt_yield),
+        ("Production (Bu)", _dt_prod),
+    ]):
+        with _dt_sc[_ci]:
+            if _df.empty:
+                st.metric(_lbl, "—")
+            else:
+                _cy = _df["year"].max()
+                _cv = _df.loc[_df["year"] == _cy, "value"]
+                _pv = _df.loc[_df["year"] == _cy - 1, "value"]
+                _cur = float(_cv.iloc[0]) if not _cv.empty else None
+                _pre = float(_pv.iloc[0]) if not _pv.empty else None
+                if _cur is None:
+                    st.metric(_lbl, "—")
+                else:
+                    _yr   = str(int(_cy))
+                    _is_yld = "Yield" in _lbl
+                    _fmt  = f"{_cur:.1f}" if _is_yld else f"{_cur:,.0f}"
+                    _delt = None
+                    if _pre is not None:
+                        _delt = f"{_cur - _pre:+.1f}" if _is_yld else f"{_cur - _pre:+,.0f}"
+                    st.metric(f"{_lbl} ({_yr})", _fmt, _delt)
+
+    st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+
+    # ── Chart helper ──────────────────────────────────────────────────────────
+    def _dt_chart(df: pd.DataFrame, title: str, color: str, yield_fmt: bool = False) -> go.Figure:
+        fig = go.Figure()
+        if df.empty:
+            fig.add_annotation(
+                text="No data — check NASS cache (USE_SNOWFLAKE=1 required)",
+                showarrow=False, font=dict(size=12, color="#9ca3af"),
+            )
+        else:
+            yrs  = df["year"].astype(int).tolist()
+            vals = df["value"].tolist()
+            avg5 = [
+                sum(vals[max(0, i - 4): i + 1]) / len(vals[max(0, i - 4): i + 1])
+                for i in range(len(vals))
+            ]
+            fig.add_trace(go.Bar(
+                x=yrs, y=vals,
+                marker_color=color, marker_opacity=0.82, name=title,
+                hovertemplate="%{x}: %{y:,.1f}<extra></extra>" if yield_fmt
+                              else "%{x}: %{y:,.0f}<extra></extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=yrs, y=avg5, mode="lines",
+                line=dict(color=JPSI_DARK, width=1.8, dash="dot"),
+                name="5-yr avg",
+                hovertemplate="%{x}: %{y:,.1f} (avg)<extra></extra>" if yield_fmt
+                              else "%{x}: %{y:,.0f} (avg)<extra></extra>",
+            ))
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=12, color=JPSI_DARK), x=0, pad=dict(l=0)),
+            height=280, paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False, margin=dict(l=50, r=14, t=38, b=28),
+            xaxis=dict(showgrid=False, tickfont=dict(size=9)),
+            yaxis=dict(gridcolor="#f0f0f0",
+                       tickformat=".1f" if yield_fmt else ",.0f",
+                       tickfont=dict(size=9)),
+            hovermode="x unified",
+        )
+        return fig
+
+    # 2 × 2 chart grid
+    _dc1, _dc2 = st.columns(2)
+    _dc3, _dc4 = st.columns(2)
+    with _dc1:
+        st.plotly_chart(
+            _dt_chart(_dt_planted, f"{_dt_crop} — Planted Acres (NY)", _crop_color),
+            use_container_width=True,
+        )
+    with _dc2:
+        st.plotly_chart(
+            _dt_chart(_dt_harvest, f"{_dt_crop} — Harvested Acres (NY)", _crop_color),
+            use_container_width=True,
+        )
+    with _dc3:
+        st.plotly_chart(
+            _dt_chart(_dt_yield, f"{_dt_crop} — Yield Bu/Ac (NY)", _crop_color, yield_fmt=True),
+            use_container_width=True,
+        )
+    with _dc4:
+        st.plotly_chart(
+            _dt_chart(_dt_prod, f"{_dt_crop} — Production Bu (NY)", _crop_color),
+            use_container_width=True,
+        )
+
+    # ── Livestock ─────────────────────────────────────────────────────────────
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Livestock Inventory — New York</div>', unsafe_allow_html=True)
+
+    _dt_dairy  = _dt_fetch_ny(
+        "CATTLE", "INVENTORY", "HEAD",
+        reference_period_desc="FIRST OF JAN",
+        class_desc="COWS", util_practice_desc="MILK",
+    )
+    _dt_cattle = _dt_fetch_ny(
+        "CATTLE", "INVENTORY", "HEAD",
+        reference_period_desc="FIRST OF JAN",
+        class_desc="ALL CLASSES",
+    )
+    _dt_hogs   = _dt_fetch_ny(
+        "HOGS", "INVENTORY", "HEAD",
+        reference_period_desc="FIRST OF DEC",
+    )
+
+    _lv_c1, _lv_c2, _lv_c3 = st.columns(3)
+    with _lv_c1:
+        st.plotly_chart(
+            _dt_chart(_dt_dairy,  "Dairy Cows — Jan 1 Inventory (NY)", "#5ba5af"),
+            use_container_width=True,
+        )
+    with _lv_c2:
+        st.plotly_chart(
+            _dt_chart(_dt_cattle, "All Cattle & Calves — Jan 1 (NY)", JPSI_DARK),
+            use_container_width=True,
+        )
+    with _lv_c3:
+        st.plotly_chart(
+            _dt_chart(_dt_hogs,   "Hogs & Pigs — Dec 1 Inventory (NY)", "#8b5cf6"),
+            use_container_width=True,
+        )
+    st.caption(
+        "Livestock: USDA NASS annual inventory surveys (Jan 1 cattle, Dec 1 hogs). "
+        "If charts are empty the livestock series may not yet be in the JSA NASS cache — "
+        "add the relevant pull to the usda-nass-etl cron."
     )
