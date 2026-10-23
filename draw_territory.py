@@ -13,6 +13,7 @@ import streamlit as st
 import dt_nass
 import ny_asd_data as nd
 import ny_asd_figs as nf
+import ny_ho
 
 _CTX: dict = {}
 _LIVE_TTL = 6 * 3600
@@ -161,9 +162,11 @@ def render(sf_connect, sf_secret, dark: str, blue: str) -> None:
     USDA NASS production by ASD district and county, with estimates for counties NASS withholds, plus livestock inventory.
   </div>
 </div>""", unsafe_allow_html=True)
-    t_nass, t_live = st.tabs(["NASS Production", "Livestock"])
+    t_nass, t_ho, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Livestock"])
     with t_nass:
         _nass_tab()
+    with t_ho:
+        _ho_tab()
     with t_live:
         _livestock_tab()
 
@@ -255,8 +258,13 @@ def _nass_tab() -> None:
         k4.metric("Counties Below Prior", f"{int((vals < 0).sum()):,} ▼")
 
     # ── map view ──────────────────────────────────────────────────────────────
-    st.radio("Map View", ["ASD District", "County"], horizontal=True, key="ny_map_view")
+    mv1, mv2 = st.columns([1, 2])
+    mv1.radio("Map View", ["ASD District", "County"], horizontal=True, key="ny_map_view")
     map_view = st.session_state["ny_map_view"]
+    with mv2:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        show_comp = st.checkbox("Show competition on the map (roasters, mills, dealers, crushers)", key="ny_comp_nass")
+    comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
 
     if map_view == "ASD District":
         view_df, cur_df, est_d = cobj.district_view(metric, year, change, comp, adj, fc_stats if is_fc else None)
@@ -265,7 +273,7 @@ def _nass_tab() -> None:
         if stat in nd.ESTIMABLE and not is_fc:
             comp_df = cobj.completed(stat, year, adj)
             n_est = int(comp_df["is_estimated"].sum()) if not comp_df.empty else 0
-        fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d)
+        fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d, comp_cats)
         if fig is None:
             st.info("ASD district map not available for this selection.")
         else:
@@ -304,7 +312,7 @@ def _nass_tab() -> None:
                                f"({_fmt_val(metric, abs_val)}): NASS publishes its county and state estimates separately.")
     else:
         cdf = cobj.county_view(metric, year, change, comp, adj)
-        fig = nf.county_fig(cdf, geo, crop, year, metric, change)
+        fig = nf.county_fig(cdf, geo, crop, year, metric, change, comp_cats)
         if fig is None:
             st.info("County map not available for this selection (county estimates are published after harvest)."
                     if is_fc else "County map not available for this selection.")
@@ -537,6 +545,118 @@ def _history_section(cobj, crop, year, metric, change, comp, adj, is_fc, fc_stat
                                  "Estimated": ["Est" if e else "" for e in tbl["is_estimated"]]})
             st.dataframe(show, use_container_width=True, hide_index=True)
 
+
+# ── high-oleic density + competition ──────────────────────────────────────────
+def _ho_tab() -> None:
+    geo = _geo()
+    cobj, err = _get_crop("Soybeans")
+    _source_note(err)
+    st.markdown(
+        "<div class='callout'><strong>High-oleic (HO) soybeans are identity-preserved and contract-driven.</strong> "
+        "Seed and grower contracts lock up 18-24 months ahead and processors place contracts the September before the "
+        "crop, so HO acres are effectively unavailable for conventional origination where they concentrate. "
+        "This map shows where that blocked zone sits, who else is buying, and what is left to originate.</div>",
+        unsafe_allow_html=True)
+
+    years = [y for y in nd.YEARS if y != nd.FORECAST_YEAR]
+    c1, c2, c3 = st.columns([1, 1.2, 3])
+    year = c1.selectbox("Soybean year", years, index=0, key="ny_ho_year")
+    share = c2.number_input(
+        "NY high-oleic share of soy acres (%)", min_value=0.0, max_value=100.0, value=ny_ho.STATE_HO_SHARE * 100,
+        step=1.0, format="%.0f", key="ny_ho_share",
+        help="Your estimate is closer to 60% than the one-third NYCSGA cited in early 2025. The county map is scaled so "
+             "the acre-weighted state share equals this number.")
+    c3.radio("Map", nf.HO_VIEWS, horizontal=True, key="ny_ho_view")
+    view = st.session_state["ny_ho_view"]
+
+    with st.expander("Model settings", expanded=False):
+        m1, m2, m3 = st.columns(3)
+        radius = m1.slider("Roaster / mill reach (miles)", 10, 80, 35, 5, key="ny_ho_radius",
+                           help="How quickly a roaster's or feed mill's pull fades with distance from a county.")
+        dairy_w = m2.slider("Weight on dairy density", 0.0, 1.0, 0.3, 0.05, key="ny_ho_dairy",
+                            help="Share of the score from milk-cow density (Jan 2023); the rest comes from roaster/mill proximity.")
+        zone_w = m3.slider("Weight your zone calls", 0.0, 1.0, 0.5, 0.05, key="ny_ho_zone",
+                           help="0 = pure proximity + dairy model. 1 = your blocked / conventional-pool calls scale each "
+                                "county's score fully (blocked x1.0, partly blocked x0.85, pool x0.25, other x0.6).")
+        st.caption("This is a transparent proxy, not observed data: county-level HO trait data does not exist publicly. "
+                   "Seed companies track variety placement by county and may share aggregates under NDA; that would replace this.")
+
+    ac = cobj.completed("harvested", year)
+    pr = cobj.completed("production", year)
+    if ac.empty:
+        st.warning(f"No county soybean data for {year}.")
+        return
+    tbl = ny_ho.ho_table(geo, dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
+                         share / 100.0, float(radius), float(dairy_w), float(zone_w))
+    base = tbl[tbl["Soy acres"] > 0]
+    tot_ac, ho_ac = base["Soy acres"].sum(), base["HO acres"].sum()
+    conv_bu = base["Conv bu"].sum()
+    open_bu = base[base["Zone"].isin(["open", "other"])]["Conv bu"].sum()
+    blocked_ac = base[base["Zone"] == "blocked"]["Soy acres"].sum()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"{year} NY soybean acres", f"{tot_ac / 1e3:,.0f}K")
+    k2.metric("Est. high-oleic acres", f"{ho_ac / 1e3:,.0f}K", f"{ho_ac / tot_ac:.0%} of acres", delta_color="off", delta_arrow="off")
+    k3.metric("Conventional pool", f"{conv_bu / 1e6:,.2f}M bu", f"{tot_ac - ho_ac:,.0f} acres", delta_color="off", delta_arrow="off")
+    k4.metric("Outside blocked zone", f"{open_bu / 1e6:,.2f}M bu",
+              f"{open_bu / conv_bu:.0%} of the pool" if conv_bu else None, delta_color="off", delta_arrow="off",
+              help="Conventional bushels in your conventional-pool counties and in counties you haven't assessed "
+                   "(excludes the blocked ring and the partly blocked Wyoming / Steuben).")
+
+    o1, o2 = st.columns([2.2, 2.8])
+    show_zones = o1.checkbox("Outline your blocked zone and conventional pool", value=True, key="ny_ho_zones")
+    cats = o2.multiselect("Show competition", list(ny_ho.CATEGORIES), default=list(ny_ho.CATEGORIES),
+                          format_func=lambda k: ny_ho.CATEGORIES[k]["label"], key="ny_ho_cats")
+    fig = nf.ho_fig(tbl, geo, view, year, share / 100.0, cats, show_zones)
+    fig.update_layout(dragmode=False)
+    st.plotly_chart(fig, use_container_width=True, key="ny_ho_map",
+                    config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+    _, off = nf.competition_points(geo, cats)
+    st.caption("Hover any marker for details; click a legend entry to hide or show that group. Stars are the Du Mond Grain "
+               "plants." + (f" {off} competitor location(s) fall off the map frame (Perdue's Pennsylvania plants, to the south)."
+                            if off else "") + " Markers placed at a town or county centre are flagged in the hover.")
+
+    st.button(f"Use {share:.0f}% as the high-oleic adjustment on the NASS Production tab", key="ny_ho_apply",
+              on_click=lambda v=float(share): st.session_state.__setitem__("ny_ho", v),
+              help="Carves this share out of New York soybean production, planted and harvested acres there.")
+
+    st.markdown("<hr style='border-color:#d7e2dc;margin:10px 0'>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">Competition and demand nodes</div>', unsafe_allow_html=True)
+    prec_txt = {"address": "street address", "town": "town centre", "county": "county centre", "none": "not placed on the map"}
+    shown = 0
+    for key, meta in ny_ho.CATEGORIES.items():
+        if key not in cats:
+            continue
+        items = [c for c in ny_ho.COMPETITORS if c["cat"] == key]
+        if not items:
+            continue
+        lines = []
+        for c in items:
+            where = c["town"] + (f", {c['county']} Co." if c["county"] and "as listed" not in c["county"] else
+                                 (f" ({c['county']})" if c["county"] else ""))
+            tag = {"planned": " *(planned)*", "unconfirmed": " *(unconfirmed)*"}.get(c.get("status", ""), "")
+            wt = f" · model weight {c['pull']:g}" if c["pull"] else ""
+            lines.append(f"- **{c['name']}**{tag} — {where} *({prec_txt[c['prec']]}{wt})*  \n  {c['note']}")
+        st.markdown(f"<span style='color:{meta['color']};font-weight:700;'>● {meta['label']}</span>", unsafe_allow_html=True)
+        st.markdown("\n".join(lines))
+        shown += len(items)
+    if not shown:
+        st.caption("No competition groups selected.")
+    st.caption("Model weight = the assumed pull (0-3) of that node as high-oleic demand in the density model; no weight = "
+               "not used. Out-of-state and export nodes are shown for context only.")
+
+    with st.expander("County detail (model inputs and results)", expanded=False):
+        det = tbl[tbl["Soy acres"] > 0].sort_values("Conv bu", ascending=False)
+        st.dataframe(pd.DataFrame({
+            "County": det["County"], "Your zone": det["Zone"].map(ny_ho.ZONE_LABEL),
+            "Soy acres": det["Soy acres"].round(0), "Dairy cows (Jan 2023)": det["Dairy cows"],
+            "Roaster pull": det["Roaster pull"].round(2), "Est. HO share": (det["HO share"] * 100).round(0),
+            "Est. HO acres": det["HO acres"].round(0), "Conventional acres": det["Conv acres"].round(0),
+            "Conventional bu": det["Conv bu"].round(0)}), use_container_width=True, hide_index=True,
+            column_config={"Est. HO share": st.column_config.NumberColumn(format="%d%%")})
+        st.caption("Counties not in your dairy list (e.g. Oswego, Otsego, Yates, Warren) are scored as zero dairy. Acres and "
+                   "bushels are NASS harvested acres and production, with NASS-withheld counties estimated as on the "
+                   "NASS Production tab.")
 
 # ── livestock ─────────────────────────────────────────────────────────────────
 def _livestock_tab() -> None:

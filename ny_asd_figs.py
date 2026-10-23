@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+import ny_ho
+
 GEO_FILE = Path(__file__).with_name("ny_asd_geo.json")
 
 # Same tokens as the ASD dashboard
@@ -116,7 +118,7 @@ def _repel(lon: float, lat: float, r: float):
     return lon, lat
 
 
-def add_facilities(fig) -> None:
+def add_facilities(fig, legend: str = "tl") -> None:
     """Du Mond Grain facilities: a large star, with its name on a leader line out over Lake Ontario so it
     never covers map data. Always drawn on top of the map."""
     lx, ly = [], []
@@ -135,8 +137,14 @@ def add_facilities(fig) -> None:
         marker=dict(symbol="star", size=30, color=_STAR_COLOR, line=dict(color=_STAR_EDGE, width=2.5)),
         name="Du Mond Grain facility", showlegend=True,
         hovertemplate="<b>Du Mond Grain</b><br>%{text}<extra></extra>"))
-    fig.update_layout(legend=dict(x=0.01, y=0.985, xanchor="left", yanchor="top", bgcolor="rgba(255,255,255,0.9)",
-                                  bordercolor=BORDER, borderwidth=1, font=dict(size=13, color=TEXT)))
+    if legend == "bottom":
+        fig.update_layout(legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.005, yanchor="top",
+                                      bgcolor="rgba(255,255,255,0.9)", bordercolor=BORDER, borderwidth=1,
+                                      font=dict(size=13, color=TEXT), itemsizing="constant"),
+                          margin=dict(l=0, r=0, t=56, b=110))
+    else:
+        fig.update_layout(legend=dict(x=0.01, y=0.985, xanchor="left", yanchor="top", bgcolor="rgba(255,255,255,0.9)",
+                                      bordercolor=BORDER, borderwidth=1, font=dict(size=13, color=TEXT)))
 
 
 def geo_view(geo: dict, pad_lon: float = 0.2, pad_lat: float = 0.12) -> dict:
@@ -210,8 +218,54 @@ def _z_range(cfg, z_vals):
     return (min(pos) if pos else 0), (max(pos) if pos else 1)
 
 
+# ── competition layer ─────────────────────────────────────────────────────────
+def _wrap(text: str, width: int = 52) -> str:
+    import textwrap
+    return "<br>".join(textwrap.wrap(text, width))
+
+
+def competition_points(geo: dict, cats=None) -> tuple:
+    """(plottable competitors, number off the map frame). cats = category keys to include (None = all)."""
+    v = geo_view(geo)
+    keep, off = [], 0
+    for c in ny_ho.COMPETITORS:
+        if c.get("lat") is None or (cats is not None and c["cat"] not in cats):
+            continue
+        if not (v["lon"][0] <= c["lon"] <= v["lon"][1] and v["lat"][0] <= c["lat"] <= v["lat"][1]):
+            off += 1
+            continue
+        keep.append(c)
+    return keep, off
+
+
+def add_competition(fig, geo: dict, cats=None) -> int:
+    """One legend-toggleable trace per competitor category. Returns the number drawn."""
+    keep, _ = competition_points(geo, cats)
+    n = 0
+    for key, meta in ny_ho.CATEGORIES.items():
+        pts = [c for c in keep if c["cat"] == key]
+        if not pts:
+            continue
+        hover = []
+        for c in pts:
+            st = {"planned": " (planned)", "unconfirmed": " (unconfirmed)"}.get(c.get("status", ""), "")
+            prec = {"address": "street address", "town": "town centre", "county": "county centre"}.get(c["prec"], "")
+            hover.append(f"<b>{c['name']}</b>{st}<br>{meta['label']}<br>{c['town']}"
+                         f"{', ' + c['county'] + ' Co.' if c['county'] and 'as listed' not in c['county'] else ''}"
+                         f" <i>({prec})</i><br>{_wrap(c['note'])}")
+        faded = [0.55 if c.get("status") else 1.0 for c in pts]
+        is_open = meta["symbol"].endswith("-open")
+        fig.add_trace(go.Scattergeo(
+            lon=[c["lon"] for c in pts], lat=[c["lat"] for c in pts], mode="markers", name=meta["label"],
+            marker=dict(symbol=meta["symbol"], size=meta["size"], opacity=faded,
+                        color=meta["color"], line=dict(color=meta["color"] if is_open else "white", width=2.2 if is_open else 1.4)),
+            text=hover, hovertemplate="%{text}<extra></extra>", showlegend=True))
+        n += len(pts)
+    return n
+
+
 # ── maps ──────────────────────────────────────────────────────────────────────
-def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str):
+def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None):
     """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
     if df is None or df.empty:
         return None
@@ -250,12 +304,16 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
                                     showlegend=False, hoverinfo="skip"))
     rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and not est.get(f)]
     place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"])
-    add_facilities(fig)
+    if competition:
+        add_competition(fig, geo, competition)
+    add_facilities(fig, "bottom" if competition else "tl")
     sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
     frame_map(fig, geo)
     fig.update_layout(**_base_layout(f"NASS {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>",
                                      18, 64),
-                      height=map_height(geo))
+                      height=map_height(geo) + (90 if competition else 0))
+    if competition:
+        fig.update_layout(margin=dict(l=0, r=0, t=64, b=110))
     return fig
 
 
@@ -265,7 +323,7 @@ def _exteriors(geom):
 
 
 def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: str, year: int,
-                 metric: str, change_view: str, est_districts: set):
+                 metric: str, change_view: str, est_districts: set, competition=None):
     """Counties coloured by ASD district value, bold district boundaries, name + value labels."""
     if view_df is None or view_df.empty:
         return None
@@ -325,10 +383,106 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
     fig.add_trace(go.Scattergeo(lon=lons, lat=lats, mode="text", text=texts,
                                 textfont=dict(color="black", size=14, family="Arial Black"),
                                 showlegend=False, hoverinfo="skip"))
-    add_facilities(fig)
+    if competition:
+        add_competition(fig, geo, competition)
+    add_facilities(fig, "bottom" if competition else "tl")
     frame_map(fig, geo)
     fig.update_layout(**{**_base_layout(f"NASS {year} {crop} — {view_label} | New York AG Districts", 18, 56),
-                         "height": map_height(geo), "geo": dict(showlakes=False)})
+                         "height": map_height(geo) + (90 if competition else 0), "geo": dict(showlakes=False)})
+    if competition:
+        fig.update_layout(margin=dict(l=0, r=0, t=56, b=110))
+    return fig
+
+
+# ── high-oleic density map ────────────────────────────────────────────────────
+HO_VIEWS = ["Est. HO share of soy acres", "Est. HO acres", "Conventional pool (bu)", "Your zones"]
+_OR_RD = [[0, "#fff7ec"], [0.25, "#fdd49e"], [0.5, "#fc8d59"], [0.75, "#d7301f"], [1, "#7f0000"]]
+
+
+def _k_label(v):
+    if v is None or pd.isna(v) or v <= 0:
+        return ""
+    return f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.0f}K" if v >= 1e3 else f"{v:.0f}")
+
+
+def ho_fig(tbl: pd.DataFrame, geo: dict, view: str, year: int, state_share: float, comp_cats=None,
+           show_zones: bool = True):
+    """County map of the modeled high-oleic density (or the conventional pool / your zones), with zone
+    outlines, the competition layer and the Du Mond stars."""
+    counties = geo["counties"]
+    all_fips = [f["id"] for f in counties["features"]]
+    t = tbl.set_index("fips")
+    line = dict(color="#8fa6bb", width=1.1)
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
+                                colorscale=[[0, PANEL], [1, PANEL]], showscale=False, marker=dict(line=line),
+                                hoverinfo="skip"))
+
+    def hover(f):
+        r = t.loc[f]
+        base = f"<b>{r['County']}</b><br>Your zone: {ny_ho.ZONE_LABEL[r['Zone']]}"
+        if r["Soy acres"] and not pd.isna(r["HO share"]):
+            return (f"{base}<br>Soy acres: {r['Soy acres']:,.0f}<br>Dairy cows (Jan 2023): "
+                    f"{'n/a' if pd.isna(r['Dairy cows']) else format(r['Dairy cows'], ',.0f')}"
+                    f"<br>Est. HO share: {r['HO share']:.0%} ({r['HO acres']:,.0f} ac)"
+                    f"<br>Conventional: {r['Conv acres']:,.0f} ac / {r['Conv bu'] / 1e3:,.0f}K bu")
+        return f"{base}<br>No soybean acres reported"
+
+    texts = [hover(f) for f in all_fips]
+    if view == "Your zones":
+        order = {"other": 0, "open": 1, "partial": 2, "blocked": 3}
+        z = [order[t.loc[f, "Zone"]] for f in all_fips]
+        cscale = [[0, ny_ho.ZONE_COLOR["other"]], [0.34, ny_ho.ZONE_COLOR["open"]],
+                  [0.67, ny_ho.ZONE_COLOR["partial"]], [1, ny_ho.ZONE_COLOR["blocked"]]]
+        fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=z, zmin=0, zmax=3,
+                                    colorscale=cscale, showscale=False, marker=dict(line=line), text=texts,
+                                    hovertemplate="%{text}<extra></extra>"))
+        for key in ("blocked", "partial", "open", "other"):
+            fig.add_trace(go.Scattergeo(lon=[None], lat=[None], mode="markers", name=ny_ho.ZONE_LABEL[key],
+                                        marker=dict(symbol="square", size=14, color=ny_ho.ZONE_COLOR[key]),
+                                        showlegend=True))
+        title, sub, label_vals, label_fn = "Your zone calls", "From the 2026-10-22 notes (section six)", None, None
+    else:
+        col, scale, cb, fmt = {
+            "Est. HO share of soy acres": ("HO share", _OR_RD, "Est. HO<br>share (%)", None),
+            "Est. HO acres": ("HO acres", _OR_RD, "Est. HO<br>acres", None),
+            "Conventional pool (bu)": ("Conv bu", SAGE_SEQ, "Conventional<br>bushels", None),
+        }[view]
+        vals = {f: t.loc[f, col] for f in all_fips if t.loc[f, "Soy acres"] and not pd.isna(t.loc[f, col])}
+        z = [(vals[f] * 100 if view.startswith("Est. HO share") else vals[f]) if f in vals else None for f in all_fips]
+        zmax = 100 if view.startswith("Est. HO share") else max([v for v in z if v is not None] or [1])
+        fig.add_trace(go.Choropleth(
+            geojson=counties, featureidkey="id", locations=all_fips, z=z, zmin=0, zmax=zmax, colorscale=scale,
+            marker=dict(line=line), text=texts, hovertemplate="%{text}<extra></extra>",
+            colorbar=dict(title=dict(text=cb, font=dict(color=TEXT, size=13)), tickfont=dict(color=TEXT, size=12),
+                          thickness=22, len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom",
+                          bgcolor="rgba(255,255,255,0.85)")))
+        label_fn = (lambda v: f"{v * 100:.0f}%") if view.startswith("Est. HO share") else _k_label
+        label_vals = vals
+        title = view
+        sub = {"Est. HO share of soy acres": f"Modeled, scaled to a {state_share:.0%} state share",
+               "Est. HO acres": f"Modeled, scaled to a {state_share:.0%} state share",
+               "Conventional pool (bu)": "Soybean bushels not under high-oleic programs (modeled)"}[view]
+    cents = geo["centroids"]
+    if label_vals:
+        keys = [f for f in all_fips if f in label_vals]
+        place_labels(fig, keys, [label_vals[f] for f in keys], cents, label_fn)
+    if show_zones and view != "Your zones":
+        for key, width in (("blocked", 3.6), ("partial", 3.2), ("open", 3.6)):
+            locs = [f for f in all_fips if t.loc[f, "Zone"] == key]
+            fig.add_trace(go.Choropleth(
+                geojson=counties, featureidkey="id", locations=locs, z=[0] * len(locs),
+                colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]], showscale=False,
+                marker=dict(line=dict(color=ny_ho.ZONE_COLOR[key], width=width)), hoverinfo="skip"))
+            fig.add_trace(go.Scattergeo(lon=[None], lat=[None], mode="lines", name=f"Outline: {ny_ho.ZONE_LABEL[key]}",
+                                        line=dict(color=ny_ho.ZONE_COLOR[key], width=4), showlegend=True))
+    if comp_cats:
+        add_competition(fig, geo, comp_cats)
+    add_facilities(fig, "bottom")
+    frame_map(fig, geo)
+    fig.update_layout(**_base_layout(f"{title} — {year} soybeans | New York counties<br><sup>{sub}</sup>", 18, 64),
+                      height=map_height(geo) + 120)
+    fig.update_layout(margin=dict(l=0, r=0, t=64, b=120))
     return fig
 
 
