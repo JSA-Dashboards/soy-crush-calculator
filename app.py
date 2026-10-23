@@ -272,13 +272,21 @@ def _dt_fetch_ny(
     util_practice_desc: str = "",
     class_desc: str = "",
 ) -> pd.DataFrame:
-    """Fetch NY state data from JSA.NASS_CACHE. Returns year/value DataFrame."""
+    """Fetch NY state data from JSA.NASS_CACHE. Returns year/value DataFrame.
+
+    Cache key matches _broad_metric_params() in domestic-production-dashboard:
+    reference_period_desc is STRIPPED from the key (ETL caches all periods together);
+    domain_desc=TOTAL and freq_desc=ANNUAL are REQUIRED.
+    reference_period_desc is used only for post-fetch filtering.
+    """
+    # Build params exactly as _broad_metric_params does in domestic-production-dashboard
     params: dict = {
         "commodity_desc": commodity_desc,
         "statisticcat_desc": statisticcat_desc,
         "unit_desc": unit_desc,
-        "reference_period_desc": reference_period_desc,
         "source_desc": "SURVEY",
+        "domain_desc": "TOTAL",    # required — ETL always includes this
+        "freq_desc": "ANNUAL",     # required — ETL always includes this
         "agg_level_desc": "STATE",
         "year__GE": year__GE,
     }
@@ -286,6 +294,7 @@ def _dt_fetch_ny(
         params["util_practice_desc"] = util_practice_desc
     if class_desc:
         params["class_desc"] = class_desc
+    # reference_period_desc intentionally excluded from cache key
     ck = _nass_cache_key(params)
     try:
         conn = _sf_connect()
@@ -306,6 +315,17 @@ def _dt_fetch_ny(
         df = pd.DataFrame(records)
         if "state_alpha" in df.columns:
             df = df[df["state_alpha"] == "NY"]
+        # Filter by reference_period_desc post-fetch (livestock needs FIRST OF JAN / DEC)
+        if "reference_period_desc" in df.columns:
+            rp = reference_period_desc.upper()
+            rp_matches = df[df["reference_period_desc"].str.upper() == rp]
+            if not rp_matches.empty:
+                df = rp_matches
+            elif rp != "YEAR":
+                # Requested period not found — fall back to YEAR rows
+                yr_rows = df[df["reference_period_desc"].str.upper() == "YEAR"]
+                if not yr_rows.empty:
+                    df = yr_rows
         df["year"] = pd.to_numeric(df.get("year", pd.Series(dtype=float)), errors="coerce")
         df["value"] = pd.to_numeric(
             df.get("Value", pd.Series(dtype=str)).astype(str).str.replace(",", ""),
