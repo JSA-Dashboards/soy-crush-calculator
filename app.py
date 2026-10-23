@@ -338,13 +338,13 @@ _DT_CROPS: dict = {
 
 _DT_LIVESTOCK: dict = {
     "Dairy Cows": {
-        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "COWS",         "util_practice_desc": "MILK", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY"},
+        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "COWS",        "util_practice_desc": "MILK", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF JAN"},
     },
     "All Cattle & Calves": {
-        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "ALL CLASSES",  "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY"},
+        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "ALL CLASSES", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF JAN"},
     },
     "Hogs & Pigs": {
-        "Inventory (Head)": {"commodity_desc": "HOGS", "statisticcat_desc": "INVENTORY","unit_desc": "HEAD", "source_desc": "SURVEY"},
+        "Inventory (Head)": {"commodity_desc": "HOGS", "statisticcat_desc": "INVENTORY","unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF DEC"},
     },
 }
 
@@ -2430,67 +2430,103 @@ with tab_territory:
   </div>
 </div>""", unsafe_allow_html=True)
 
-    # ── Crop production ───────────────────────────────────────────────────────
+    # ── Filter controls ───────────────────────────────────────────────────────
+    _fc1, _fc2, _fc3, _fc4 = st.columns([2, 2, 1, 1.5])
+    with _fc1:
+        _dt_comm = st.selectbox(
+            "Commodity", list(_DT_ALL_COMMS.keys()), key="dt_comm",
+        )
+    with _fc2:
+        _dt_metric_opts = list(_DT_ALL_COMMS[_dt_comm].keys())
+        _dt_metric = st.selectbox(
+            "Metric", _dt_metric_opts, key=f"dt_metric_{_dt_comm}",
+        )
+    with _fc3:
+        _dt_year = st.selectbox(
+            "Year", list(range(2024, 2013, -1)), key="dt_year",
+        )
+    with _fc4:
+        _dt_view = st.radio(
+            "Map view", ["ASD Districts", "County"],
+            horizontal=True, key="dt_view",
+        )
 
-    st.markdown('<div class="sh">Crop Production</div>', unsafe_allow_html=True)
-
-    _dt_crop = st.radio(
-        "Crop", ["Corn", "Soybeans"],
-        horizontal=True, key="dt_crop", label_visibility="collapsed",
+    # ── State-level timeseries for tiles ─────────────────────────────────────
+    _dt_mp = _DT_ALL_COMMS[_dt_comm][_dt_metric]
+    _dt_state_df = _dt_fetch_ny(
+        commodity_desc=_dt_mp["commodity_desc"],
+        statisticcat_desc=_dt_mp["statisticcat_desc"],
+        unit_desc=_dt_mp["unit_desc"],
+        reference_period_desc=_dt_mp.get("reference_period_desc", "YEAR"),
+        util_practice_desc=_dt_mp.get("util_practice_desc", ""),
+        class_desc=_dt_mp.get("class_desc", ""),
     )
 
-    _CORN_COLOR = "#d97706"
-    _SOY_COLOR  = JPSI_BLUE
-
-    if _dt_crop == "Corn":
-        _dt_planted  = _dt_fetch_ny("CORN", "AREA PLANTED",  "ACRES")
-        _dt_harvest  = _dt_fetch_ny("CORN", "AREA HARVESTED","ACRES",     util_practice_desc="GRAIN")
-        _dt_yield    = _dt_fetch_ny("CORN", "YIELD",         "BU / ACRE", util_practice_desc="GRAIN")
-        _dt_prod     = _dt_fetch_ny("CORN", "PRODUCTION",    "BU",        util_practice_desc="GRAIN")
-        _crop_color  = _CORN_COLOR
-    else:
-        _dt_planted  = _dt_fetch_ny("SOYBEANS", "AREA PLANTED",  "ACRES")
-        _dt_harvest  = _dt_fetch_ny("SOYBEANS", "AREA HARVESTED","ACRES")
-        _dt_yield    = _dt_fetch_ny("SOYBEANS", "YIELD",         "BU / ACRE")
-        _dt_prod     = _dt_fetch_ny("SOYBEANS", "PRODUCTION",    "BU")
-        _crop_color  = _SOY_COLOR
-
-    # ── Summary stat tiles ────────────────────────────────────────────────────
-    _dt_sc = st.columns(4)
-    for _ci, (_lbl, _df) in enumerate([
-        ("Planted Acres",   _dt_planted),
-        ("Harvested Acres", _dt_harvest),
-        ("Yield (Bu/Ac)",   _dt_yield),
-        ("Production (Bu)", _dt_prod),
-    ]):
-        with _dt_sc[_ci]:
-            if _df.empty:
-                st.metric(_lbl, "—")
+    # ── Stat tiles ────────────────────────────────────────────────────────────
+    _is_yld = "Yield" in _dt_metric
+    _ts1, _ts2, _ts3 = st.columns(3)
+    if not _dt_state_df.empty:
+        _dt_sel_row = _dt_state_df[_dt_state_df["year"] == _dt_year]
+        _dt_pre_row = _dt_state_df[_dt_state_df["year"] == _dt_year - 1]
+        _dt_cur_val = float(_dt_sel_row["value"].iloc[0]) if not _dt_sel_row.empty else None
+        _dt_pre_val = float(_dt_pre_row["value"].iloc[0]) if not _dt_pre_row.empty else None
+        _dt_fmt     = (lambda v: f"{v:.1f}") if _is_yld else (lambda v: f"{v:,.0f}")
+        with _ts1:
+            if _dt_cur_val is not None:
+                _delt = (f"{_dt_cur_val - _dt_pre_val:+.1f}" if _is_yld
+                         else f"{_dt_cur_val - _dt_pre_val:+,.0f}") if _dt_pre_val is not None else None
+                st.metric(f"{_dt_metric} ({_dt_year})", _dt_fmt(_dt_cur_val), _delt)
             else:
-                _cy = _df["year"].max()
-                _cv = _df.loc[_df["year"] == _cy, "value"]
-                _pv = _df.loc[_df["year"] == _cy - 1, "value"]
-                _cur = float(_cv.iloc[0]) if not _cv.empty else None
-                _pre = float(_pv.iloc[0]) if not _pv.empty else None
-                if _cur is None:
-                    st.metric(_lbl, "—")
-                else:
-                    _yr   = str(int(_cy))
-                    _is_yld = "Yield" in _lbl
-                    _fmt  = f"{_cur:.1f}" if _is_yld else f"{_cur:,.0f}"
-                    _delt = None
-                    if _pre is not None:
-                        _delt = f"{_cur - _pre:+.1f}" if _is_yld else f"{_cur - _pre:+,.0f}"
-                    st.metric(f"{_lbl} ({_yr})", _fmt, _delt)
+                st.metric(f"{_dt_metric} ({_dt_year})", "—")
+        with _ts2:
+            if _dt_pre_val is not None:
+                st.metric(f"{_dt_metric} ({_dt_year - 1})", _dt_fmt(_dt_pre_val))
+            else:
+                st.metric(f"{_dt_metric} ({_dt_year - 1})", "—")
+        with _ts3:
+            _dt_5yr = _dt_state_df[_dt_state_df["year"].between(_dt_year - 5, _dt_year - 1)]
+            if len(_dt_5yr) >= 3:
+                st.metric("5-Yr Avg (state)", _dt_fmt(_dt_5yr["value"].mean()))
+            else:
+                st.metric("5-Yr Avg (state)", "—")
+    else:
+        for _c in [_ts1, _ts2, _ts3]:
+            with _c:
+                st.metric(_dt_metric, "—")
 
-    st.markdown("<div style='margin-top:4px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+
+    # ── Choropleth map ────────────────────────────────────────────────────────
+    _dt_county_df = _dt_load_county_ny(_dt_comm, _dt_metric, _dt_year)
+    if not _dt_county_df.empty:
+        try:
+            _dt_geo = _dt_load_geojson()
+            if _dt_view == "ASD Districts":
+                _dt_map_fig = _dt_asd_fig(_dt_county_df, _dt_geo, _dt_metric)
+            else:
+                _dt_map_fig = _dt_county_fig(_dt_county_df, _dt_geo, _dt_metric)
+            st.plotly_chart(_dt_map_fig, use_container_width=True)
+        except Exception as _e:
+            st.warning(f"Map could not load: {_e}")
+        # Data table
+        with st.expander("County data table"):
+            _tbl_cols = ["County", "Value"] + (["asd_desc"] if "asd_desc" in _dt_county_df.columns else [])
+            _tbl = _dt_county_df[_tbl_cols].sort_values("Value", ascending=False).reset_index(drop=True)
+            _tbl.columns = ["County"] + [_dt_metric] + (["ASD District"] if "asd_desc" in _dt_county_df.columns else [])
+            st.dataframe(_tbl, use_container_width=True)
+    else:
+        st.info(
+            f"No county-level data cached for **{_dt_comm} — {_dt_metric} ({_dt_year})**. "
+            "County-level data is cached separately — add the pull to usda-nass-etl if needed. "
+            "State-level trend data is shown below."
+        )
 
     # ── Chart helper ──────────────────────────────────────────────────────────
     def _dt_chart(df: pd.DataFrame, title: str, color: str, yield_fmt: bool = False) -> go.Figure:
         fig = go.Figure()
         if df.empty:
             fig.add_annotation(
-                text="No data — check NASS cache (USE_SNOWFLAKE=1 required)",
+                text="No data — check NASS cache",
                 showarrow=False, font=dict(size=12, color="#9ca3af"),
             )
         else:
@@ -2525,68 +2561,74 @@ with tab_territory:
         )
         return fig
 
-    # 2 × 2 chart grid
-    _dc1, _dc2 = st.columns(2)
-    _dc3, _dc4 = st.columns(2)
-    with _dc1:
-        st.plotly_chart(
-            _dt_chart(_dt_planted, f"{_dt_crop} — Planted Acres (NY)", _crop_color),
-            use_container_width=True,
-        )
-    with _dc2:
-        st.plotly_chart(
-            _dt_chart(_dt_harvest, f"{_dt_crop} — Harvested Acres (NY)", _crop_color),
-            use_container_width=True,
-        )
-    with _dc3:
-        st.plotly_chart(
-            _dt_chart(_dt_yield, f"{_dt_crop} — Yield Bu/Ac (NY)", _crop_color, yield_fmt=True),
-            use_container_width=True,
-        )
-    with _dc4:
-        st.plotly_chart(
-            _dt_chart(_dt_prod, f"{_dt_crop} — Production Bu (NY)", _crop_color),
-            use_container_width=True,
-        )
-
-    # ── Livestock ─────────────────────────────────────────────────────────────
-
+    # ── Historical trends ─────────────────────────────────────────────────────
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown('<div class="sh">Livestock Inventory — New York</div>', unsafe_allow_html=True)
-
-    _dt_dairy  = _dt_fetch_ny(
-        "CATTLE", "INVENTORY", "HEAD",
-        reference_period_desc="FIRST OF JAN",
-        class_desc="COWS", util_practice_desc="MILK",
-    )
-    _dt_cattle = _dt_fetch_ny(
-        "CATTLE", "INVENTORY", "HEAD",
-        reference_period_desc="FIRST OF JAN",
-        class_desc="ALL CLASSES",
-    )
-    _dt_hogs   = _dt_fetch_ny(
-        "HOGS", "INVENTORY", "HEAD",
-        reference_period_desc="FIRST OF DEC",
+    st.markdown(
+        f'<div class="sh">Historical Trends — {_dt_comm} (New York State)</div>',
+        unsafe_allow_html=True,
     )
 
-    _lv_c1, _lv_c2, _lv_c3 = st.columns(3)
-    with _lv_c1:
+    _CORN_COLOR = "#d97706"
+    _SOY_COLOR  = JPSI_BLUE
+    _COMM_COLORS = {
+        "Corn": _CORN_COLOR, "Soybeans": _SOY_COLOR,
+        "Dairy Cows": "#5ba5af", "All Cattle & Calves": JPSI_DARK, "Hogs & Pigs": "#8b5cf6",
+    }
+    _trend_color = _COMM_COLORS.get(_dt_comm, JPSI_BLUE)
+
+    if _dt_comm in _DT_CROPS:
+        # 2×2 grid for all 4 metrics
+        _all_metrics = list(_DT_CROPS[_dt_comm].items())
+        _tc1, _tc2 = st.columns(2)
+        _tc3, _tc4 = st.columns(2)
+        _tcols = [_tc1, _tc2, _tc3, _tc4]
+        for _ti, (_mlbl, _mparams) in enumerate(_all_metrics):
+            _tdf = _dt_fetch_ny(
+                commodity_desc=_mparams["commodity_desc"],
+                statisticcat_desc=_mparams["statisticcat_desc"],
+                unit_desc=_mparams["unit_desc"],
+                util_practice_desc=_mparams.get("util_practice_desc", ""),
+                class_desc=_mparams.get("class_desc", ""),
+            )
+            with _tcols[_ti]:
+                st.plotly_chart(
+                    _dt_chart(_tdf, f"{_dt_comm} — {_mlbl} (NY)", _trend_color,
+                              yield_fmt="Yield" in _mlbl),
+                    use_container_width=True,
+                )
+    else:
+        # Single trend chart for livestock
         st.plotly_chart(
-            _dt_chart(_dt_dairy,  "Dairy Cows — Jan 1 Inventory (NY)", "#5ba5af"),
+            _dt_chart(_dt_state_df, f"{_dt_comm} — {_dt_metric} (NY)", _trend_color),
             use_container_width=True,
         )
-    with _lv_c2:
-        st.plotly_chart(
-            _dt_chart(_dt_cattle, "All Cattle & Calves — Jan 1 (NY)", JPSI_DARK),
-            use_container_width=True,
-        )
-    with _lv_c3:
-        st.plotly_chart(
-            _dt_chart(_dt_hogs,   "Hogs & Pigs — Dec 1 Inventory (NY)", "#8b5cf6"),
-            use_container_width=True,
-        )
-    st.caption(
-        "Livestock: USDA NASS annual inventory surveys (Jan 1 cattle, Dec 1 hogs). "
-        "If charts are empty the livestock series may not yet be in the JSA NASS cache — "
-        "add the relevant pull to the usda-nass-etl cron."
-    )
+
+    # ── Livestock overview (always shown) ─────────────────────────────────────
+    if _dt_comm in _DT_CROPS:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown('<div class="sh">Livestock Inventory — New York</div>', unsafe_allow_html=True)
+        _dt_dairy  = _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
+                                  reference_period_desc="FIRST OF JAN",
+                                  class_desc="COWS", util_practice_desc="MILK")
+        _dt_cattle = _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
+                                  reference_period_desc="FIRST OF JAN",
+                                  class_desc="ALL CLASSES")
+        _dt_hogs   = _dt_fetch_ny("HOGS",   "INVENTORY", "HEAD",
+                                  reference_period_desc="FIRST OF DEC")
+        _lv_c1, _lv_c2, _lv_c3 = st.columns(3)
+        with _lv_c1:
+            st.plotly_chart(
+                _dt_chart(_dt_dairy,  "Dairy Cows — Jan 1 (NY)", "#5ba5af"),
+                use_container_width=True,
+            )
+        with _lv_c2:
+            st.plotly_chart(
+                _dt_chart(_dt_cattle, "All Cattle & Calves — Jan 1 (NY)", JPSI_DARK),
+                use_container_width=True,
+            )
+        with _lv_c3:
+            st.plotly_chart(
+                _dt_chart(_dt_hogs,   "Hogs & Pigs — Dec 1 (NY)", "#8b5cf6"),
+                use_container_width=True,
+            )
+        st.caption("Livestock: USDA NASS annual surveys. Jan 1 cattle, Dec 1 hogs.")
