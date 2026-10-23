@@ -14,6 +14,7 @@ import dt_nass
 import ny_asd_data as nd
 import ny_asd_figs as nf
 import ny_ho
+import ny_livestock as nl
 
 _CTX: dict = {}
 _LIVE_TTL = 6 * 3600
@@ -658,8 +659,244 @@ def _ho_tab() -> None:
                    "bushels are NASS harvested acres and production, with NASS-withheld counties estimated as on the "
                    "NASS Production tab.")
 
-# ── livestock ─────────────────────────────────────────────────────────────────
+# ── livestock: Census county / ASD view, then the annual state survey ─────────
+_LS_UNITS = {"Inventory (head)": ("K head", 1e3, ".1f"), "Farms with Inventory": ("farms", 1, ",.0f"),
+             "Head per Farm": ("head/farm", 1, ".0f")}
+
+
+@st.cache_resource(show_spinner=False)
+def _ls_obj(comm: str) -> nl.NYLivestock:
+    return nl.NYLivestock(comm, _geo())
+
+
+def _fmt_ls(v) -> str:
+    return "—" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:,.0f}"
+
+
 def _livestock_tab() -> None:
+    geo = _geo()
+    codes = {v[0]: v[1] for v in _fips_map().values()}
+
+    c1, c2, c3 = st.columns([1.1, 0.75, 2.35])
+    comm = c1.selectbox("Livestock", nl.COMMODITIES, key="ny_ls_comm")
+    year = c2.selectbox("Census Year", nl.years(), key="ny_ls_year")
+    c3.selectbox("State Drill-Down", ["NY  —  New York"], key="ny_ls_state", disabled=True)
+
+    st.markdown("<p style='color:#5f7267;font-size:0.78rem;margin:4px 0 2px 0;'>Metric</p>", unsafe_allow_html=True)
+    metric = st.radio("Metric", nl.METRICS, horizontal=True, key="ny_ls_metric", label_visibility="collapsed")
+    st.markdown("<p style='color:#5f7267;font-size:0.78rem;margin:4px 0 2px 0;'>View</p>", unsafe_allow_html=True)
+    change = st.radio("Change View", nl.CHANGE_OPTS, horizontal=True, key="ny_ls_change", label_visibility="collapsed",
+                      format_func=lambda o: "Census Year" if o == "Current Year" else o)
+    comp = None
+    if change == "vs Selected Year":
+        cc, _ = st.columns([0.55, 2.6])
+        comp = cc.selectbox("Compare to Census", [y for y in nl.years() if y != year], key="ny_ls_comp_year")
+
+    L = _ls_obj(comm)
+    stat = nl.stat_of(metric)
+    ratio = metric in nl.RATIO_METRICS
+    st.caption("USDA Census of Agriculture, inventory as of Dec 31. NASS publishes county livestock only in the Census "
+               "(every five years); the annual survey below is state level.")
+
+    state_val = L.state_value(stat, year)
+    n_listed = len(L.county_values("inventory", year))
+    n_rep = L.reported_counties(year)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"{year} {metric}", _fmt_ls(state_val))
+    if change == "Current Year":
+        k2.metric("County Coverage", f"{n_rep / n_listed * 100:.0f}%" if n_listed else "—",
+                  help=f"{n_rep} of {n_listed} counties have a published inventory; NASS withholds the rest to protect "
+                       "individual operations, and they are estimated here.")
+        k3.metric("Counties Reporting", f"{n_rep:,}")
+        k4.metric("ASD Districts", f"{len(codes)}")
+    else:
+        cv_all = L.county_view(metric, year, change, comp)
+        vals = cv_all["Value"].dropna()
+        k2.metric("County Coverage", f"{n_rep / n_listed * 100:.0f}%" if n_listed else "—")
+        k3.metric("Counties Above Prior", f"{int((vals > 0).sum()):,} ▲")
+        k4.metric("Counties Below Prior", f"{int((vals < 0).sum()):,} ▼")
+
+    # ── map view ──────────────────────────────────────────────────────────────
+    mv1, mv2 = st.columns([1, 2])
+    mv1.radio("Map View", ["ASD District", "County"], horizontal=True, key="ny_ls_map_view")
+    map_view = st.session_state["ny_ls_map_view"]
+    with mv2:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        show_comp = st.checkbox("Show competition on the map (roasters, mills, dealers, crushers)", key="ny_comp_ls")
+    comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
+    no_base = change != "Current Year" and L._base_year(year, change, comp) is None
+
+    if map_view == "ASD District":
+        view_df, cur_df, est_d = L.district_view(metric, year, change, comp)
+        fig = None if no_base else nf.district_fig(view_df, cur_df, geo, comm, year, metric, change, est_d, comp_cats,
+                                                   src="Census")
+        if fig is None:
+            st.info(f"No earlier Census to compare {year} with." if no_base else "ASD district map not available for "
+                    "this selection.")
+        else:
+            fig.update_layout(dragmode=False)
+            st.plotly_chart(fig, use_container_width=True, key="ny_ls_district_map",
+                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+        if not cur_df.empty:
+            t = cur_df.copy()
+            t["ASD"] = t["District"].map(codes).fillna("")
+            t = t.sort_values("ASD").reset_index(drop=True)
+            tot = state_val if ratio else t["Value"].sum()
+            t[metric] = t["Value"].apply(_fmt_ls)
+            t["% of State"] = (t["Value"] / tot * 100).round(1).astype(str) if not ratio and tot else "—"
+            cols = ["District", "ASD", metric, "% of State"]
+            cv_est = L.county_values(stat if stat != "per_farm" else "inventory", year)
+            n_est = int(cv_est["is_estimated"].sum()) if not cv_est.empty else 0
+            if n_est:
+                e = (cv_est[cv_est["is_estimated"]].groupby("District")["is_estimated"].count()
+                     .rename("Est. Counties").reset_index())
+                t = t.merge(e, on="District", how="left")
+                t["Est. Counties"] = t["Est. Counties"].fillna(0).astype(int).apply(lambda n: str(n) if n else "—")
+                cols.append("Est. Counties")
+            st.markdown(f"<p style='color:#5f7267;font-size:0.82rem;font-weight:600;margin:6px 0 4px 0;'>"
+                        f"New York {year} {comm} — by ASD district</p>", unsafe_allow_html=True)
+            tc, kc = st.columns([2.4, 1])
+            with tc:
+                st.dataframe(t[cols], use_container_width=True, hide_index=True)
+            with kc:
+                m1, m2 = st.columns(2)
+                m1.metric("State Avg" if ratio else "State Total", _fmt_ls(tot))
+                m2.metric("Districts", f"{len(t)}")
+                if n_est:
+                    st.caption("Est = some counties withheld by NASS. The state Census total minus the published "
+                               "counties is shared among the withheld ones in proportion to their farm counts.")
+    else:
+        cdf = L.county_view(metric, year, change, comp)
+        fig = None if no_base else nf.county_fig(cdf, geo, comm, year, metric, change, comp_cats, src="Census")
+        if fig is None:
+            st.info(f"No earlier Census to compare {year} with." if no_base else "County map not available for this "
+                    "selection.")
+        else:
+            fig.update_layout(dragmode=False)
+            st.plotly_chart(fig, use_container_width=True, key="ny_ls_county_map",
+                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+            n_cty_est = int(cdf["is_estimated"].sum())
+            if n_cty_est > 0:
+                st.caption(f"Est = {n_cty_est} counties withheld by NASS. The state Census total minus the published "
+                           "counties is shared among the withheld ones in proportion to their farm counts. Counties "
+                           "NASS lists no data for show as No data.")
+
+    st.markdown("<hr style='border-color:#d7e2dc;margin:8px 0'>", unsafe_allow_html=True)
+    _ls_history(L, comm, year, metric, change, comp, codes)
+    st.markdown("<hr style='border-color:#d7e2dc;margin:14px 0 8px 0'>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#5f7267;font-size:0.82rem;font-weight:600;margin:0 0 6px 0;letter-spacing:0.04em;'>"
+                "📈 ANNUAL STATE SURVEY — NEW YORK</p>", unsafe_allow_html=True)
+    _ls_annual()
+
+
+def _ls_history(L, comm, year, metric, change, comp, codes) -> None:
+    stat = nl.stat_of(metric)
+    ratio = metric in nl.RATIO_METRICS
+    unit_lbl, div, fmt = _LS_UNITS[metric]
+    state_name = "New York"
+    h1, h2 = st.columns([1.4, 2.6])
+    scope = h1.radio("View", ["State", "ASD District", "County"], horizontal=True, key="ny_ls_scope")
+    dist = county = None
+    with h2:
+        if scope == "ASD District":
+            dist = st.selectbox("District", sorted(codes), key="ny_ls_hist_district")
+            label = f"{state_name} — {dist}"
+        elif scope == "County":
+            county = st.selectbox("County", sorted(L.names.values()), key="ny_ls_hist_county")
+            label = f"{state_name} — {county} County"
+        else:
+            label = state_name
+
+    hyears = sorted(y for y in L.years if y <= year)
+
+    def value_for(y: int):
+        if scope == "State":
+            return L.state_value(stat, y)
+        if scope == "ASD District":
+            return L.district_series(metric, y)[0].get(dist)
+        cv = L.county_values(stat, y)
+        r = cv[cv["County"] == county]
+        return float(r["Value"].iloc[0]) if not r.empty else None
+
+    vals = [value_for(y) for y in hyears]
+    st.plotly_chart(nf.history_bar({metric: [v / div if v else 0 for v in vals]}, hyears,
+                                   f"{label} — {comm} {metric}", unit_lbl, fmt=fmt),
+                    use_container_width=True, key="ny_ls_hist_chart", config={"displayModeBar": False})
+    st.markdown("<hr style='border-color:#d7e2dc;margin:8px 0'>", unsafe_allow_html=True)
+
+    st.markdown(f"<p style='color:#5f7267;font-size:0.82rem;font-weight:600;margin:0 0 6px 0;letter-spacing:0.04em;'>"
+                f"📅 CENSUS HISTORY — {label} | {min(hyears)}–{max(hyears)}</p>", unsafe_allow_html=True)
+    title_tail = f"({unit_lbl}) | {min(hyears)}–{max(hyears)}"
+    ly = "% vs Prior Census"
+    dist_county: dict = {}
+    d_yr: dict = {}
+    if scope == "State":
+        rows = {state_name: {y: L.state_value(stat, y) for y in hyears}}
+        fig = nf.heatmap_table(rows, hyears, f"{comm} — {metric} {title_tail}", unit_lbl, div, ratio, fmt=fmt,
+                               first_col="State", ly_label=ly)
+    elif scope == "ASD District":
+        status: dict = {}
+        totals: dict = {}
+        est_by_dist: dict = {}
+        for y in hyears:
+            vy, ey = L.district_series(metric, y)
+            for d, v in vy.items():
+                d_yr.setdefault(d, {})[y] = v
+                status.setdefault(d, {})[y] = ey.get(d, False)
+            cdf = L.county_values(stat, y)
+            if not cdf.empty:
+                totals[y] = float(cdf["Value"].sum()) if not ratio else L.state_value(stat, y)
+            for r in cdf[cdf["District"].notna()].itertuples():
+                dist_county.setdefault(r.District, {}).setdefault(r.County, {})[y] = float(r.Value)
+                est_by_dist.setdefault(r.District, {}).setdefault(r.County, {})[y] = bool(r.is_estimated)
+        fig = nf.heatmap_table(d_yr, hyears, f"New York {comm} — {metric} by ASD District {title_tail}", unit_lbl, div,
+                               ratio, total=totals if not ratio else None, fmt=fmt, cell_status=status,
+                               total_label="NY Total", first_col="District", ly_label=ly)
+    else:
+        c_yr: dict = {}
+        for y in hyears:
+            for r in L.county_values(stat, y).itertuples():
+                c_yr.setdefault(r.County, {})[y] = float(r.Value)
+        fig = nf.heatmap_table(c_yr, hyears, f"New York {comm} — {metric} by County {title_tail}", unit_lbl, div, ratio,
+                               fmt=fmt, total_label="NY Total", first_col="County", ly_label=ly)
+    st.plotly_chart(fig, use_container_width=True, key="ny_ls_heatmap", config={"displayModeBar": False})
+
+    if scope == "ASD District" and dist_county:
+        st.caption("▼ Expand any district below to view county detail  ·  Top 2 = green  ·  Bottom 2 = red per row  ·  "
+                   "E = includes a withheld county estimated by Census share  ·  Olympic Avg drops the highest and lowest year.")
+        for dname in sorted(dist_county):
+            cd = dist_county[dname]
+            with st.expander(f"▼  {dname}  —  {len(cd)} counties", expanded=False):
+                est_map = est_by_dist.get(dname, {})
+                cs = {cn: {y: est_map.get(cn, {}).get(y, False) for y in hyears} for cn in cd}
+                top_cs = {y: any(est_map.get(cn, {}).get(y, False) for cn in cd) for y in hyears}
+                cfig = nf.heatmap_table(
+                    cd, hyears, f"{dname} — County Detail ({unit_lbl})", unit_lbl, div, ratio, fmt=fmt,
+                    top_row=d_yr.get(dname, {}), top_row_label=f"{dname} District Total", cell_status=cs,
+                    top_row_cell_status=top_cs, total_label="NY Total", first_col="County", ly_label=ly)
+                st.plotly_chart(cfig, use_container_width=True, key=f"ny_ls_cty_tbl_{dname}",
+                                config={"displayModeBar": False})
+    else:
+        st.caption("Top 2 = green  ·  Bottom 2 = red per row  ·  Olympic Avg drops the highest and lowest Census year.")
+    st.markdown("<hr style='border-color:#d7e2dc;margin:8px 0'>", unsafe_allow_html=True)
+
+    cv = L.county_view(metric, year, change, comp)
+    if not cv.empty:
+        st.plotly_chart(nf.ranking_chart(cv, comm, year, metric, change,
+                                         by_district=st.session_state.get("ny_ls_map_view") == "ASD District",
+                                         src="Census"),
+                        use_container_width=True, key="ny_ls_ranking")
+        with st.expander("County Data Table — New York", expanded=False):
+            tbl = cv[["County", "Value", "District", "is_estimated"]].dropna(subset=["Value"]) \
+                .sort_values("Value", ascending=False)
+            col = f"% Change ({metric})" if change != "Current Year" else metric
+            show = pd.DataFrame({"County": tbl["County"], "District": tbl["District"],
+                                 col: [f"{v:+.1f}%" if change != "Current Year" else _fmt_ls(v) for v in tbl["Value"]],
+                                 "Estimated": ["Est" if e else "" for e in tbl["is_estimated"]]})
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+def _ls_annual() -> None:
     series, err = _livestock()
     _source_note(err)
     ty = pd.Timestamp.today().year
@@ -699,6 +936,6 @@ def _livestock_tab() -> None:
                           xaxis=dict(showgrid=False, tickfont=dict(size=9, color="#6b7280"), linecolor="#e5e7eb"),
                           yaxis=dict(gridcolor="#e5e7eb", tickformat=",.0f", tickfont=dict(size=9, color="#6b7280"),
                                      linecolor="#e5e7eb"))
-        col.plotly_chart(fig, use_container_width=True, key=f"ny_ls_{comm}")
+        col.plotly_chart(fig, use_container_width=True, key=f"ny_ls_ann_{comm}")
     st.caption("Livestock: USDA NASS annual surveys. Jan 1 cattle/dairy, Dec 1 hogs. NASS publishes New York hog "
                "inventory through 2023.")

@@ -47,6 +47,20 @@ def fmt_yield(v):
     return "" if pd.isna(v) or v == 0 else f"{v:.0f}"
 
 
+def fmt_head(v):
+    if pd.isna(v) or v == 0:
+        return ""
+    if v >= 1e6:
+        return f"{v / 1e6:.1f}M"
+    if v >= 1e4:
+        return f"{v / 1e3:.0f}K"
+    return f"{v / 1e3:.1f}K" if v >= 1e3 else f"{v:.0f}"
+
+
+def fmt_count(v):
+    return "" if pd.isna(v) or v == 0 else f"{v:,.0f}"
+
+
 def auto_bu(mx: float) -> tuple:
     if mx >= 500e6:
         return 1e9, "B bu"
@@ -74,7 +88,14 @@ def view_cfg(metric: str, change_view: str) -> dict:
           "label_fn": fmt_bu, "rank_unit": "M bu", "rank_div": 1_000_000, "rank_fmt": ",.2f"}
     ac = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_sfx": " ac", "label_unit": "K ac",
           "label_fn": fmt_acres, "rank_unit": "K ac", "rank_div": 1_000, "rank_fmt": ",.1f"}
+    head = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_fn": fmt_count}
     return {
+        "Inventory (head)": {**head, "clabel": "Inventory<br>(head)", "hover_sfx": " head", "label_unit": "head",
+                             "label_fn": fmt_head, "rank_unit": "K head", "rank_div": 1_000, "rank_fmt": ",.1f"},
+        "Farms with Inventory": {**head, "clabel": "Farms with<br>inventory", "hover_sfx": " farms", "label_unit": "farms",
+                                 "label_fn": fmt_count, "rank_unit": "farms", "rank_div": 1, "rank_fmt": ",.0f"},
+        "Head per Farm": {**head, "clabel": "Head per<br>farm", "hover_sfx": " head/farm", "label_unit": "head/farm",
+                          "label_fn": fmt_yield, "rank_unit": "head/farm", "rank_div": 1, "rank_fmt": ",.0f"},
         "Total Supply (bu)": {**bu, "clabel": "Total Supply<br>(bu)"},
         "Production (bu)": {**bu, "clabel": "Production<br>(bu)"},
         "Planted Acres": {**ac, "clabel": "Planted<br>Acres"},
@@ -265,7 +286,8 @@ def add_competition(fig, geo: dict, cats=None) -> int:
 
 
 # ── maps ──────────────────────────────────────────────────────────────────────
-def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None):
+def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None,
+               src: str = "NASS"):
     """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
     if df is None or df.empty:
         return None
@@ -282,7 +304,7 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
         z.append(v if v is not None and not pd.isna(v) else None)
         lbl = name.get(f) or next((x["properties"]["NAME"] for x in counties["features"] if x["id"] == f), f)
         sfx = " (Est)" if est.get(f) else ""
-        hover.append(f"{lbl}{sfx}: {cfg['label_fn'](v)}{cfg['hover_sfx']}" if v else f"{lbl}: No data")
+        hover.append(f"{lbl}{sfx}: {cfg.get('hover_fn', cfg['label_fn'])(v)}{cfg['hover_sfx']}" if v else f"{lbl}: No data")
     z_min, z_max = _z_range(cfg, [v for v in z if v is not None])
     line = dict(color="#8fa6bb", width=1.1)
     fig = go.Figure()
@@ -309,7 +331,7 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
     add_facilities(fig, "bottom" if competition else "tl")
     sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
     frame_map(fig, geo)
-    fig.update_layout(**_base_layout(f"NASS {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>",
+    fig.update_layout(**_base_layout(f"{src} {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>",
                                      18, 64),
                       height=map_height(geo) + (90 if competition else 0))
     if competition:
@@ -323,7 +345,7 @@ def _exteriors(geom):
 
 
 def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: str, year: int,
-                 metric: str, change_view: str, est_districts: set, competition=None):
+                 metric: str, change_view: str, est_districts: set, competition=None, src: str = "NASS"):
     """Counties coloured by ASD district value, bold district boundaries, name + value labels."""
     if view_df is None or view_df.empty:
         return None
@@ -387,7 +409,7 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
         add_competition(fig, geo, competition)
     add_facilities(fig, "bottom" if competition else "tl")
     frame_map(fig, geo)
-    fig.update_layout(**{**_base_layout(f"NASS {year} {crop} — {view_label} | New York AG Districts", 18, 56),
+    fig.update_layout(**{**_base_layout(f"{src} {year} {crop} — {view_label} | New York AG Districts", 18, 56),
                          "height": map_height(geo) + (90 if competition else 0), "geo": dict(showlakes=False)})
     if competition:
         fig.update_layout(margin=dict(l=0, r=0, t=56, b=110))
@@ -487,12 +509,12 @@ def ho_fig(tbl: pd.DataFrame, geo: dict, view: str, year: int, state_share: floa
 
 
 # ── charts ────────────────────────────────────────────────────────────────────
-def history_bar(series: dict, years: list, title: str, y_label: str = "") -> go.Figure:
+def history_bar(series: dict, years: list, title: str, y_label: str = "", fmt: str = ".2f") -> go.Figure:
     colors = ["#0693e3", "#f59e0b", "#ef4444", "#a78bfa", "#16a34a", "#fb923c", "#e879f9"]
     fig = go.Figure()
     for i, (name, vals) in enumerate(series.items()):
         fig.add_trace(go.Bar(x=years, y=vals, name=name, marker_color=colors[i % len(colors)],
-                             marker_line_width=0, text=[f"{v:.2f}" for v in vals], textposition="outside",
+                             marker_line_width=0, text=[f"{v:{fmt}}" for v in vals], textposition="outside",
                              textfont=dict(color=TEXT, size=9), cliponaxis=False))
     layout = _base_layout(title)
     layout.update(height=320, barmode="group",
@@ -515,7 +537,8 @@ def _rank_layout(fig, title, n, cfg, view_label, l_margin=10):
         yaxis=dict(gridcolor=BORDER, tickfont=dict(color=TEXT, size=9), automargin=True))
 
 
-def ranking_chart(df: pd.DataFrame, crop: str, year: int, metric: str, change_view: str, by_district: bool = False):
+def ranking_chart(df: pd.DataFrame, crop: str, year: int, metric: str, change_view: str, by_district: bool = False,
+                  src: str = "NASS"):
     """Horizontal county ranking; optionally grouped and coloured by ASD district."""
     cfg = view_cfg(metric, change_view)
     view_label = metric if change_view == "Current Year" else f"{change_view} — {metric}"
@@ -543,7 +566,7 @@ def ranking_chart(df: pd.DataFrame, crop: str, year: int, metric: str, change_vi
                                font=dict(color=ASD_PALETTE.get(code, MUTED), size=9), showarrow=False,
                                xanchor="right", xshift=-72)
             cum += len(grp)
-        title = f"New York County Rankings by AG District — {crop} {view_label} (NASS {year})"
+        title = f"New York County Rankings by AG District — {crop} {view_label} ({src} {year})"
         margin = 165
     else:
         d = d.sort_values("Value", ascending=True)
@@ -553,7 +576,7 @@ def ranking_chart(df: pd.DataFrame, crop: str, year: int, metric: str, change_vi
             marker_color=[ACCENT if v >= raw_avg else "#e05252" for v in d["Value"]], marker_line_width=0,
             text=[f"{v:{fmt}}" for v in x], textposition="outside", textfont=dict(color=TEXT, size=8),
             cliponaxis=False, hovertemplate=f"%{{y}}: %{{x:{fmt}}} {cfg['rank_unit']}<extra></extra>"))
-        title = f"New York County Rankings — {crop} {view_label} (NASS {year})"
+        title = f"New York County Rankings — {crop} {view_label} ({src} {year})"
         margin = 10
     fig.add_vline(x=avg_disp, line_color="#d97706", line_width=1.5, line_dash="dash",
                   annotation_text=f"  Avg: {avg_disp:{fmt}} {cfg['rank_unit']}", annotation_position="top left",
@@ -585,7 +608,7 @@ def heatmap_table(rows: dict, years: list, title: str, unit: str = "M bu", divis
                   is_ratio: bool = False, total: dict | None = None, total_label: str = "NY Total",
                   fmt: str = ".1f", top_row: dict | None = None, top_row_label: str = "",
                   cell_status: dict | None = None, top_row_cell_status: dict | None = None,
-                  first_col: str = "Row") -> go.Figure:
+                  first_col: str = "Row", ly_label: str = "% vs LY") -> go.Figure:
     """Per-row heat map (top 2 green, bottom 2 red) with % vs LY, olympic average, % of average, min/max
     and share of the total. rows: {label: {year: raw_value_or_None}}."""
     _D, _P, _S, _BR, _T, _M, _A, _G = ("#f5f7fa", "#edf1f7", "#e2e8f2", "#c8d5e3", "#1a2332", "#64748b",
@@ -692,7 +715,7 @@ def heatmap_table(rows: dict, years: list, title: str, unit: str = "M bu", divis
         s = num(data[r][c])
         return f"{s} E" if status.get(labels[r], {}).get(years[c], False) else s
 
-    hdr = [first_col] + [str(y) for y in years] + ["% vs LY", f"Olympic Avg\n({unit})", "% of Avg", "Min", "Max",
+    hdr = [first_col] + [str(y) for y in years] + [ly_label, f"Olympic Avg\n({unit})", "% of Avg", "Min", "Max",
                                                     "% of NY"]
     vals = [labels] + [[cell(r, c) for r in range(n_rows)] for c in range(len(years))] + [s_ly, s_avg, s_pavg, s_min, s_max, s_share]
     fills = ([[(_BR if pinned[i] else _P) for i in range(n_rows)]]
