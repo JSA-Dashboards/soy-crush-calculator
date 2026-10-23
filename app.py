@@ -5,7 +5,7 @@ Standard CME / hexane solvent extraction yields per bushel:
   Oil:   11 lbs
   GPM  = ZM($/ton) × 0.022 + ZL($/lb) × 11 - ZS($/bu)
 
-Extruder (client default, editable in sidebar):
+Extruder (client default, editable at the top of the page):
   365.5 lbs oil / ton meal, 44.38 bu / ton meal  →  8.235 lbs oil/bu, 0.022532 t meal/bu
   GPM  = ZM × 0.022532 + ZL × 8.235 - ZS
 
@@ -435,7 +435,7 @@ st.set_page_config(
     page_title="Soy Crush Calculator · JPSI",
     page_icon=FAVICON,
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Hide the Streamlit Community Cloud viewer badge (the profile avatar that links
@@ -459,6 +459,8 @@ st.markdown(f"""
   }}
   table td, table th {{ font-variant-numeric: tabular-nums; }}
   header[data-testid="stHeader"] {{ display: none !important; }}
+  [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"],
+  [data-testid="collapsedControl"] {{ display: none !important; }}
   #MainMenu {{ visibility: hidden !important; }}
   footer {{ visibility: hidden !important; }}
   .block-container {{
@@ -544,55 +546,50 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Controls (top of the page; there is no sidebar) ───────────────────────────
 
-with st.sidebar:
+try:
+    api_key: str = st.secrets.get("MASSIVE_API_KEY", "")
+except Exception:
+    api_key = ""
+if not api_key:
+    api_key = st.text_input("Massive API Key", type="password")
+
+with st.container(border=True):
     st.markdown(
-        f'<div style="text-align:center;padding:14px 8px;border-bottom:3px solid {JPSI_BLUE};'
-        f'margin:-1rem -1rem 20px -1rem;background:rgba(6,147,227,0.06);">'
-        f'<img src="{LOGO_URL}" style="height:32px;margin-bottom:6px;" alt="JSA">'
-        f'<h3 style="margin:0;color:{JPSI_DARK};font-size:0.9rem;font-weight:600;">Soy Crush Calculator</h3>'
-        f'<small style="color:#6b7280;font-size:0.78rem;">Extruder vs. CME Board</small>'
-        f'</div>',
+        f'<div class="sh" style="margin:0 0 8px 0;">Extruder Yields '
+        f'<span style="font-weight:400;font-size:0.82rem;color:#6b7280;margin-left:8px;">'
+        f'Edit to match your plant\'s actual output</span></div>',
         unsafe_allow_html=True,
     )
-
-    try:
-        api_key: str = st.secrets.get("MASSIVE_API_KEY", "")
-    except Exception:
-        api_key = ""
-    if not api_key:
-        api_key = st.text_input("Massive API Key", type="password")
-
-    st.markdown(f'<div class="sh" style="margin-top:12px;">Extruder Yields</div>', unsafe_allow_html=True)
-    st.caption("Edit to match your plant's actual output")
-
-    oil_per_ton = st.number_input("Lbs oil per ton of meal",
+    _ctl1, _ctl2, _ctl3, _ctl4, _ctl5 = st.columns([1.15, 1.15, 1.5, 1.5, 1.2], gap="medium")
+    oil_per_ton = _ctl1.number_input("Oil per ton of meal (lbs)",
         value=DEFAULT_OIL_LBS_PER_TON, min_value=100.0, max_value=600.0, step=1.0, format="%.1f")
-    bu_per_ton  = st.number_input("Bushels of beans per ton of meal",
+    bu_per_ton  = _ctl2.number_input("Beans per ton of meal (bu)",
         value=DEFAULT_BU_PER_TON, min_value=30.0, max_value=60.0, step=0.01, format="%.2f")
 
     ext_meal_tons, ext_oil_lbs = ext_yields(oil_per_ton, bu_per_ton)
 
-    st.markdown("---")
-    st.markdown(f"""
-<div style="font-size:0.85rem;color:{JPSI_DARK};">
-  <div style="font-weight:700;margin-bottom:6px;">Extruder (calculated)</div>
+    _card = ("font-size:0.85rem;color:{dark};line-height:1.55;background:#f6f8fa;border:1px solid #e5e7eb;"
+             "border-radius:8px;padding:8px 12px;")
+    _ctl3.markdown(f"""
+<div style="padding-top:1.7rem;"><div style="{_card.format(dark=JPSI_DARK)}">
+  <div style="font-weight:700;">Extruder (calculated)</div>
   <div>Meal: <b>{ext_meal_tons:.5f}</b> t/bu &nbsp;({ext_meal_tons*2000:.2f} lbs)</div>
   <div>Oil: &nbsp;<b>{ext_oil_lbs:.4f}</b> lbs/bu</div>
-  <div style="font-weight:700;margin:10px 0 6px 0;">CME Standard (hexane)</div>
+</div></div>""", unsafe_allow_html=True)
+    _ctl4.markdown(f"""
+<div style="padding-top:1.7rem;"><div style="{_card.format(dark=JPSI_DARK)}">
+  <div style="font-weight:700;">CME Standard (hexane)</div>
   <div>Meal: <b>{CME_MEAL_TONS:.4f}</b> t/bu &nbsp;(44.00 lbs)</div>
   <div>Oil: &nbsp;<b>{CME_OIL_LBS:.2f}</b> lbs/bu</div>
-</div>
-""", unsafe_allow_html=True)
-
-    st.markdown("---")
-    n_contracts = st.slider("Contracts to load", min_value=3, max_value=14, value=8)
+</div></div>""", unsafe_allow_html=True)
+    n_contracts = _ctl5.slider("Contracts to load", min_value=3, max_value=14, value=8)
 
 # ── Auth gate ─────────────────────────────────────────────────────────────────
 
 if not api_key:
-    st.info("Enter your Massive API key in the sidebar to load live prices.")
+    st.info("Enter your Massive API key above to load live prices.")
     st.stop()
 
 today = date.today()
@@ -1482,7 +1479,7 @@ with tab_position:
 <strong>Crush Position</strong> — Monthly supply schedule, crush plan, and meal/oil balance
 for your plant.  Opening inventory cascades month-over-month from closing.
 Meal and oil produced are calculated automatically from your crush schedule and
-extruder yield parameters set in the sidebar.
+extruder yield parameters set at the top of the page.
 </div>""", unsafe_allow_html=True)
 
     # ── Load / init state ─────────────────────────────────────────────────────
