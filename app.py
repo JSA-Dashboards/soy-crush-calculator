@@ -291,7 +291,7 @@ def _dt_fetch_ny(
         conn = _sf_connect()
         cur  = conn.cursor()
         cur.execute(
-            "SELECT response_json FROM JSA.NASS_CACHE WHERE cache_key = %s LIMIT 1",
+            "SELECT data FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s LIMIT 1",
             (ck,),
         )
         row = cur.fetchone()
@@ -301,7 +301,8 @@ def _dt_fetch_ny(
     if not row:
         return pd.DataFrame()
     try:
-        records = json.loads(row[0])
+        raw = row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
+        records = raw.get("data", []) if isinstance(raw, dict) else raw
         df = pd.DataFrame(records)
         if "state_alpha" in df.columns:
             df = df[df["state_alpha"] == "NY"]
@@ -316,6 +317,199 @@ def _dt_fetch_ny(
         )
     except Exception:
         return pd.DataFrame()
+
+
+# ── Draw Territory commodity/metric config ────────────────────────────────────
+
+_DT_CROPS: dict = {
+    "Corn": {
+        "Planted Acres":   {"commodity_desc": "CORN", "statisticcat_desc": "AREA PLANTED",  "unit_desc": "ACRES",     "source_desc": "SURVEY"},
+        "Harvested Acres": {"commodity_desc": "CORN", "statisticcat_desc": "AREA HARVESTED","unit_desc": "ACRES",     "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
+        "Yield (Bu/Ac)":   {"commodity_desc": "CORN", "statisticcat_desc": "YIELD",         "unit_desc": "BU / ACRE", "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
+        "Production (Bu)": {"commodity_desc": "CORN", "statisticcat_desc": "PRODUCTION",    "unit_desc": "BU",        "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
+    },
+    "Soybeans": {
+        "Planted Acres":   {"commodity_desc": "SOYBEANS", "statisticcat_desc": "AREA PLANTED",  "unit_desc": "ACRES",     "source_desc": "SURVEY"},
+        "Harvested Acres": {"commodity_desc": "SOYBEANS", "statisticcat_desc": "AREA HARVESTED","unit_desc": "ACRES",     "source_desc": "SURVEY"},
+        "Yield (Bu/Ac)":   {"commodity_desc": "SOYBEANS", "statisticcat_desc": "YIELD",         "unit_desc": "BU / ACRE", "source_desc": "SURVEY"},
+        "Production (Bu)": {"commodity_desc": "SOYBEANS", "statisticcat_desc": "PRODUCTION",    "unit_desc": "BU",        "source_desc": "SURVEY"},
+    },
+}
+
+_DT_LIVESTOCK: dict = {
+    "Dairy Cows": {
+        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "COWS",         "util_practice_desc": "MILK", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY"},
+    },
+    "All Cattle & Calves": {
+        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "ALL CLASSES",  "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY"},
+    },
+    "Hogs & Pigs": {
+        "Inventory (Head)": {"commodity_desc": "HOGS", "statisticcat_desc": "INVENTORY","unit_desc": "HEAD", "source_desc": "SURVEY"},
+    },
+}
+
+_DT_ALL_COMMS: dict = {**_DT_CROPS, **_DT_LIVESTOCK}
+
+# Light-card palette for map / table (matches JPSI light theme)
+_DT_CARD = "#ffffff"
+_DT_BORD = "#e5e7eb"
+_DT_TXT  = "#111827"
+_DT_SEC  = "#6b7280"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _dt_load_county_ny(commodity: str, metric_label: str, year: int) -> pd.DataFrame:
+    """Load NY county NASS data from JSA.NASS_CACHE using the same key as the domestic-production-dashboard ETL."""
+    mp = _DT_ALL_COMMS.get(commodity, {}).get(metric_label)
+    if mp is None:
+        return pd.DataFrame()
+    # County params: strip reference_period_desc, add county-specific fields
+    params = {k: v for k, v in mp.items() if k != "reference_period_desc"}
+    params.update({
+        "domain_desc": "TOTAL",
+        "freq_desc": "ANNUAL",
+        "agg_level_desc": "COUNTY",
+        "year": str(year),
+    })
+    ck = _nass_cache_key(params)
+    try:
+        conn = _sf_connect()
+        cur  = conn.cursor()
+        cur.execute("SELECT data FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s LIMIT 1", (ck,))
+        row = cur.fetchone()
+        conn.close()
+    except Exception:
+        return pd.DataFrame()
+    if not row:
+        return pd.DataFrame()
+    try:
+        raw = row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
+        records = raw.get("data", []) if isinstance(raw, dict) else raw
+        df = pd.DataFrame(records)
+        # Filter to NY
+        if "state_alpha" in df.columns:
+            df = df[df["state_alpha"] == "NY"]
+        # Drop aggregate/other rows
+        if "county_ansi" in df.columns:
+            df = df[~df["county_ansi"].isin({"998", "000", "999"})]
+        if "county_name" in df.columns:
+            df = df[~df["county_name"].str.strip().str.lower().str.startswith("other")]
+        if df.empty:
+            return pd.DataFrame()
+        # Numeric value
+        df["Value"] = pd.to_numeric(
+            df["Value"].astype(str).str.replace(",", ""), errors="coerce"
+        )
+        df = df.dropna(subset=["Value"])
+        # FIPS
+        if "state_fips_code" in df.columns and "county_ansi" in df.columns:
+            df["fips"] = df["state_fips_code"].str.zfill(2) + df["county_ansi"].str.zfill(3)
+        else:
+            df["fips"] = ""
+        df["State"]  = df["state_alpha"].str.strip() if "state_alpha" in df.columns else "NY"
+        df["County"] = df["county_name"].str.strip().str.title() if "county_name" in df.columns else ""
+        # Prefer ALL PRODUCTION PRACTICES
+        key_cols = ["State", "County", "fips"]
+        if "prodn_practice_desc" in df.columns:
+            all_p = df[df["prodn_practice_desc"] == "ALL PRODUCTION PRACTICES"].copy()
+            rest  = df[~df["fips"].isin(all_p["fips"].unique())].copy()
+            if not rest.empty:
+                rest = rest.loc[rest.groupby(key_cols, sort=False)["Value"].idxmax()]
+            df = pd.concat([all_p, rest], ignore_index=True)
+        extra = [c for c in ["asd_desc", "asd_code"] if c in df.columns]
+        return df[key_cols + ["Value"] + extra].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _dt_load_geojson() -> dict:
+    import urllib.request as _req
+    url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
+    with _req.urlopen(url, timeout=30) as r:
+        return json.load(r)
+
+
+def _dt_centroid(feat: dict):
+    geom = feat["geometry"]
+    rings = [geom["coordinates"][0]] if geom["type"] == "Polygon" else [p[0] for p in geom["coordinates"]]
+    best  = max(rings, key=lambda r: (
+        (max(p[0] for p in r) - min(p[0] for p in r)) *
+        (max(p[1] for p in r) - min(p[1] for p in r))
+    ))
+    return (sum(p[0] for p in best) / len(best), sum(p[1] for p in best) / len(best))
+
+
+def _dt_county_fig(df: pd.DataFrame, geo: dict, metric_label: str) -> go.Figure:
+    is_yield = "Yield" in metric_label
+    unit     = " Bu/Ac" if is_yield else (" Ac" if "Acres" in metric_label else (" Head" if "Head" in metric_label else " Bu"))
+    fmt      = ".1f" if is_yield else ",.0f"
+    NY_FIPS  = "36"
+    geo_sub  = {"type": "FeatureCollection", "features": [f for f in geo["features"] if f["properties"]["STATE"] == NY_FIPS]}
+    fig = go.Figure(go.Choropleth(
+        geojson=geo_sub, locations=df["fips"], z=df["Value"],
+        featureidkey="id",
+        colorscale="RdYlGn" if is_yield else "YlOrRd",
+        marker_line_width=0.5, marker_line_color=_DT_BORD,
+        colorbar=dict(title=dict(text=unit.strip(), font=dict(size=11, color=_DT_SEC)),
+                      tickfont=dict(size=10, color=_DT_SEC), thickness=12, len=0.65, x=1.0),
+        hovertemplate=f"<b>%{{text}}</b><br>{metric_label}: %{{z:{fmt}}}{unit}<extra></extra>",
+        text=df["County"] + ", NY",
+    ))
+    fig.update_geos(scope="usa", projection_type="albers usa", fitbounds="geojson",
+                    showlakes=False, showland=True, landcolor="#f8f9fa",
+                    showcoastlines=False, showframe=False)
+    fig.update_layout(paper_bgcolor=_DT_CARD, plot_bgcolor=_DT_CARD,
+                      margin=dict(l=0, r=0, t=0, b=0), height=480, font=dict(color=_DT_TXT))
+    return fig
+
+
+def _dt_asd_fig(df: pd.DataFrame, geo: dict, metric_label: str) -> go.Figure:
+    if "asd_desc" not in df.columns or df["asd_desc"].isna().all():
+        return _dt_county_fig(df, geo, metric_label)
+    is_yield = "Yield" in metric_label
+    unit     = " Bu/Ac" if is_yield else (" Ac" if "Acres" in metric_label else (" Head" if "Head" in metric_label else " Bu"))
+    fmt      = ".1f" if is_yield else ",.0f"
+    agg_fn   = "mean" if is_yield else "sum"
+    dist_agg = (df.groupby(["asd_desc", "asd_code"], as_index=False)["Value"]
+                  .agg(agg_fn).rename(columns={"Value": "DistValue"}))
+    merged   = df.merge(dist_agg, on=["asd_desc", "asd_code"], how="left")
+    NY_FIPS  = "36"
+    geo_sub  = {"type": "FeatureCollection", "features": [f for f in geo["features"] if f["properties"]["STATE"] == NY_FIPS]}
+    fig = go.Figure(go.Choropleth(
+        geojson=geo_sub, locations=merged["fips"], z=merged["DistValue"],
+        featureidkey="id",
+        colorscale="RdYlGn" if is_yield else "YlOrRd",
+        marker_line_width=0.4, marker_line_color=_DT_BORD,
+        colorbar=dict(title=dict(text=unit.strip(), font=dict(size=11, color=_DT_SEC)),
+                      tickfont=dict(size=10, color=_DT_SEC), thickness=12, len=0.65, x=1.0),
+        hovertemplate=f"<b>%{{text}}</b><br>District {metric_label}: %{{z:{fmt}}}{unit}<extra></extra>",
+        text=merged["asd_desc"],
+    ))
+    # District labels from county centroids
+    cent_map: dict = {}
+    for feat in geo_sub["features"]:
+        fips5 = feat["properties"]["STATE"] + feat["properties"]["COUNTY"]
+        cx, cy = _dt_centroid(feat)
+        cent_map[fips5] = (cx, cy)
+    merged["_cx"] = merged["fips"].map(lambda f: cent_map.get(f, (None, None))[0])
+    merged["_cy"] = merged["fips"].map(lambda f: cent_map.get(f, (None, None))[1])
+    dc = merged.dropna(subset=["_cx"]).groupby("asd_desc", as_index=False).agg(
+        lon=("_cx","mean"), lat=("_cy","mean"), val=("DistValue","first"))
+    if not dc.empty:
+        lbl_fn = (lambda v: f"{v:.1f}") if is_yield else (lambda v: f"{v/1e6:.2f}M" if v >= 1e6 else f"{v:,.0f}")
+        fig.add_trace(go.Scattergeo(
+            lon=dc["lon"], lat=dc["lat"],
+            text=dc["asd_desc"].str.replace(" District","",case=False,regex=False) + "<br>" + dc["val"].apply(lbl_fn),
+            textfont=dict(size=8, color=_DT_TXT), mode="text",
+            showlegend=False, hoverinfo="skip",
+        ))
+    fig.update_geos(scope="usa", projection_type="albers usa", fitbounds="geojson",
+                    showlakes=False, showland=True, landcolor="#f8f9fa",
+                    showcoastlines=False, showframe=False)
+    fig.update_layout(paper_bgcolor=_DT_CARD, plot_bgcolor=_DT_CARD,
+                      margin=dict(l=0, r=0, t=0, b=0), height=480, font=dict(color=_DT_TXT))
+    return fig
 
 
 def _extract_ch_report_image(img_bytes: bytes, mime: str) -> dict:
