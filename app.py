@@ -729,6 +729,15 @@ st.markdown(f"""
     border: 1px solid #e5e7eb; background: #fff; margin-bottom: 12px;
   }}
   hr {{ border: none; border-top: 1px solid #e5e7eb; margin: 14px 0; }}
+  .kpi-card {{ background:#fff; border:1px solid #e5e7eb; border-radius:8px;
+               padding:14px 18px; height:100%; }}
+  .kpi-label {{ color:#6b7280; font-size:11px; font-weight:700;
+                text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }}
+  .kpi-value {{ color:{JPSI_DARK}; font-size:26px; font-weight:700; line-height:1.1; }}
+  .kpi-year  {{ color:#6b7280; font-size:11px; margin-top:5px; }}
+  .kpi-delta {{ font-size:13px; margin-top:3px; font-weight:600; }}
+  .kpi-pos   {{ color:#16a34a; }}
+  .kpi-neg   {{ color:#dc2626; }}
   table {{ border-collapse: collapse; width: 100%; font-size: 0.9rem; }}
   th {{
     background: #f6f8fa; color: {JPSI_DARK};
@@ -2425,210 +2434,293 @@ with tab_territory:
      border-radius:8px;padding:16px 20px;margin-bottom:20px;">
   <div style="font-size:1.2rem;font-weight:700;color:#fff;">🗺️ Draw Territory — New York State</div>
   <div style="font-size:0.875rem;color:#ccc;margin-top:4px;">
-    USDA NASS crop production + livestock inventory for the plant catchment area.
-    Sourced from the JSA shared NASS cache (JSA.NASS_CACHE).
+    USDA NASS crop production + livestock inventory. Sourced from the JSA shared NASS cache.
   </div>
 </div>""", unsafe_allow_html=True)
 
-    # ── Filter controls ───────────────────────────────────────────────────────
-    _fc1, _fc2, _fc3, _fc4 = st.columns([2, 2, 1, 1.5])
+    # ── Top filter bar ────────────────────────────────────────────────────────
+    _fc1, _fc2, _fc3, _fc4 = st.columns([2, 3, 1, 0.5])
     with _fc1:
-        _dt_comm = st.selectbox(
-            "Commodity", list(_DT_ALL_COMMS.keys()), key="dt_comm",
-        )
+        _dt_comm = st.selectbox("Commodity", list(_DT_ALL_COMMS.keys()), key="dt_comm")
     with _fc2:
-        _dt_metric_opts = list(_DT_ALL_COMMS[_dt_comm].keys())
-        _dt_metric = st.selectbox(
-            "Metric", _dt_metric_opts, key=f"dt_metric_{_dt_comm}",
+        _dt_yr_range = st.slider(
+            "Historical range", 1980, 2024, (1990, 2024), step=1, key="dt_yr_range",
         )
     with _fc3:
-        _dt_year = st.selectbox(
-            "Year", list(range(2024, 2013, -1)), key="dt_year",
-        )
+        _dt_map_yr = st.selectbox("Map year", list(range(2024, 2013, -1)), key="dt_map_yr")
     with _fc4:
-        _dt_view = st.radio(
-            "Map view", ["ASD Districts", "County"],
-            horizontal=True, key="dt_view",
+        st.markdown("<div style='margin-top:26px'></div>", unsafe_allow_html=True)
+        if st.button("🔄", help="Clear cached data and reload", use_container_width=True, key="dt_refresh"):
+            st.cache_data.clear()
+            st.rerun()
+
+    _dt_is_crop   = _dt_comm in _DT_CROPS
+    _dt_comm_cfg  = _DT_ALL_COMMS[_dt_comm]
+    _dt_mlist     = list(_dt_comm_cfg.keys())
+
+    # ── Color palette ─────────────────────────────────────────────────────────
+    _DT_COLORS = {
+        "Corn":                "#d97706",
+        "Soybeans":            JPSI_BLUE,
+        "Dairy Cows":          "#5ba5af",
+        "All Cattle & Calves": JPSI_DARK,
+        "Hogs & Pigs":         "#8b5cf6",
+    }
+    _DT_FILLS = {
+        "Corn":                "rgba(217,119,6,0.12)",
+        "Soybeans":            "rgba(6,147,227,0.12)",
+        "Dairy Cows":          "rgba(91,165,175,0.12)",
+        "All Cattle & Calves": "rgba(50,55,60,0.12)",
+        "Hogs & Pigs":         "rgba(139,92,246,0.12)",
+    }
+    _trend_color = _DT_COLORS.get(_dt_comm, JPSI_BLUE)
+    _fill_color  = _DT_FILLS.get(_dt_comm, "rgba(6,147,227,0.12)")
+
+    # ── Load state-level timeseries for all metrics ───────────────────────────
+    _dt_series: dict = {}
+    for _mlbl, _mp in _dt_comm_cfg.items():
+        _dt_series[_mlbl] = _dt_fetch_ny(
+            commodity_desc=_mp["commodity_desc"],
+            statisticcat_desc=_mp["statisticcat_desc"],
+            unit_desc=_mp["unit_desc"],
+            reference_period_desc=_mp.get("reference_period_desc", "YEAR"),
+            util_practice_desc=_mp.get("util_practice_desc", ""),
+            class_desc=_mp.get("class_desc", ""),
         )
 
-    # ── State-level timeseries for tiles ─────────────────────────────────────
-    _dt_mp = _DT_ALL_COMMS[_dt_comm][_dt_metric]
-    _dt_state_df = _dt_fetch_ny(
-        commodity_desc=_dt_mp["commodity_desc"],
-        statisticcat_desc=_dt_mp["statisticcat_desc"],
-        unit_desc=_dt_mp["unit_desc"],
-        reference_period_desc=_dt_mp.get("reference_period_desc", "YEAR"),
-        util_practice_desc=_dt_mp.get("util_practice_desc", ""),
-        class_desc=_dt_mp.get("class_desc", ""),
-    )
+    # ── Value formatter (matches domestic-production-dashboard) ───────────────
+    def _dt_fmt(v: float, metric: str) -> str:
+        if "Yield" in metric or "/Ac" in metric:
+            return f"{v:.1f}"
+        if v >= 1_000_000_000:
+            return f"{v/1_000_000_000:.2f}B"
+        if v >= 1_000_000:
+            return f"{v/1_000_000:.2f}M"
+        if v >= 1_000:
+            return f"{v/1_000:.1f}K"
+        return f"{v:,.0f}"
 
-    # ── Stat tiles ────────────────────────────────────────────────────────────
-    _is_yld = "Yield" in _dt_metric
-    _ts1, _ts2, _ts3 = st.columns(3)
-    if not _dt_state_df.empty:
-        _dt_sel_row = _dt_state_df[_dt_state_df["year"] == _dt_year]
-        _dt_pre_row = _dt_state_df[_dt_state_df["year"] == _dt_year - 1]
-        _dt_cur_val = float(_dt_sel_row["value"].iloc[0]) if not _dt_sel_row.empty else None
-        _dt_pre_val = float(_dt_pre_row["value"].iloc[0]) if not _dt_pre_row.empty else None
-        _dt_fmt     = (lambda v: f"{v:.1f}") if _is_yld else (lambda v: f"{v:,.0f}")
-        with _ts1:
-            if _dt_cur_val is not None:
-                _delt = (f"{_dt_cur_val - _dt_pre_val:+.1f}" if _is_yld
-                         else f"{_dt_cur_val - _dt_pre_val:+,.0f}") if _dt_pre_val is not None else None
-                st.metric(f"{_dt_metric} ({_dt_year})", _dt_fmt(_dt_cur_val), _delt)
+    # ── KPI cards ─────────────────────────────────────────────────────────────
+    _kpi_cols = st.columns(len(_dt_mlist), gap="small")
+    for _ki, _mlbl in enumerate(_dt_mlist):
+        _mdf = _dt_series[_mlbl]
+        _lbl_short = _mlbl.split("(")[0].strip()
+        with _kpi_cols[_ki]:
+            if _mdf.empty:
+                st.markdown(
+                    f"<div class='kpi-card'><div class='kpi-label'>{_lbl_short}</div>"
+                    f"<div class='kpi-value' style='font-size:16px;color:#9ca3af;'>No data</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
             else:
-                st.metric(f"{_dt_metric} ({_dt_year})", "—")
-        with _ts2:
-            if _dt_pre_val is not None:
-                st.metric(f"{_dt_metric} ({_dt_year - 1})", _dt_fmt(_dt_pre_val))
-            else:
-                st.metric(f"{_dt_metric} ({_dt_year - 1})", "—")
-        with _ts3:
-            _dt_5yr = _dt_state_df[_dt_state_df["year"].between(_dt_year - 5, _dt_year - 1)]
-            if len(_dt_5yr) >= 3:
-                st.metric("5-Yr Avg (state)", _dt_fmt(_dt_5yr["value"].mean()))
-            else:
-                st.metric("5-Yr Avg (state)", "—")
-    else:
-        for _c in [_ts1, _ts2, _ts3]:
-            with _c:
-                st.metric(_dt_metric, "—")
+                _lat_yr = int(_mdf["year"].max())
+                _lat_v  = float(_mdf.loc[_mdf["year"] == _lat_yr, "value"].iloc[0])
+                _prev_r = _mdf[_mdf["year"] == _lat_yr - 1]
+                _prev_v = float(_prev_r["value"].iloc[0]) if not _prev_r.empty else None
+                _dhtml  = ""
+                if _prev_v and _prev_v != 0:
+                    _pct  = (_lat_v - _prev_v) / _prev_v * 100
+                    _cls  = "kpi-pos" if _pct >= 0 else "kpi-neg"
+                    _sign = "▲" if _pct >= 0 else "▼"
+                    _dhtml = f"<div class='kpi-delta {_cls}'>{_sign} {abs(_pct):.1f}% vs {_lat_yr - 1}</div>"
+                st.markdown(
+                    f"<div class='kpi-card'>"
+                    f"<div class='kpi-label'>{_lbl_short}</div>"
+                    f"<div class='kpi-value'>{_dt_fmt(_lat_v, _mlbl)}</div>"
+                    f"{_dhtml}"
+                    f"<div class='kpi-year'>{_lat_yr} — New York State</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-    st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Choropleth map ────────────────────────────────────────────────────────
-    _dt_county_df = _dt_load_county_ny(_dt_comm, _dt_metric, _dt_year)
-    if not _dt_county_df.empty:
-        try:
-            _dt_geo = _dt_load_geojson()
-            if _dt_view == "ASD Districts":
-                _dt_map_fig = _dt_asd_fig(_dt_county_df, _dt_geo, _dt_metric)
-            else:
-                _dt_map_fig = _dt_county_fig(_dt_county_df, _dt_geo, _dt_metric)
-            st.plotly_chart(_dt_map_fig, use_container_width=True)
-        except Exception as _e:
-            st.warning(f"Map could not load: {_e}")
-        # Data table
-        with st.expander("County data table"):
-            _tbl_cols = ["County", "Value"] + (["asd_desc"] if "asd_desc" in _dt_county_df.columns else [])
-            _tbl = _dt_county_df[_tbl_cols].sort_values("Value", ascending=False).reset_index(drop=True)
-            _tbl.columns = ["County"] + [_dt_metric] + (["ASD District"] if "asd_desc" in _dt_county_df.columns else [])
-            st.dataframe(_tbl, use_container_width=True)
-    else:
-        st.info(
-            f"No county-level data cached for **{_dt_comm} — {_dt_metric} ({_dt_year})**. "
-            "County-level data is cached separately — add the pull to usda-nass-etl if needed. "
-            "State-level trend data is shown below."
-        )
-
-    # ── Chart helper ──────────────────────────────────────────────────────────
-    def _dt_chart(df: pd.DataFrame, title: str, color: str, yield_fmt: bool = False) -> go.Figure:
+    # ── Trend charts ──────────────────────────────────────────────────────────
+    def _dt_trend_fig(df: pd.DataFrame, title: str, yr_range: tuple) -> go.Figure:
         fig = go.Figure()
-        if df.empty:
-            fig.add_annotation(
-                text="No data — check NASS cache",
-                showarrow=False, font=dict(size=12, color="#9ca3af"),
-            )
+        _mdf = df[df["year"].between(yr_range[0], yr_range[1])].copy() if not df.empty else df
+        _is_yld = "Yield" in title or "/Ac" in title
+        _tick   = ".1f" if _is_yld else ",.0f"
+        if _mdf.empty:
+            fig.add_annotation(text="No data — check NASS cache",
+                               showarrow=False, font=dict(size=12, color="#9ca3af"))
         else:
-            yrs  = df["year"].astype(int).tolist()
-            vals = df["value"].tolist()
-            avg5 = [
-                sum(vals[max(0, i - 4): i + 1]) / len(vals[max(0, i - 4): i + 1])
-                for i in range(len(vals))
-            ]
-            fig.add_trace(go.Bar(
-                x=yrs, y=vals,
-                marker_color=color, marker_opacity=0.82, name=title,
-                hovertemplate="%{x}: %{y:,.1f}<extra></extra>" if yield_fmt
-                              else "%{x}: %{y:,.0f}<extra></extra>",
-            ))
             fig.add_trace(go.Scatter(
-                x=yrs, y=avg5, mode="lines",
-                line=dict(color=JPSI_DARK, width=1.8, dash="dot"),
-                name="5-yr avg",
-                hovertemplate="%{x}: %{y:,.1f} (avg)<extra></extra>" if yield_fmt
-                              else "%{x}: %{y:,.0f} (avg)<extra></extra>",
+                x=_mdf["year"].astype(int), y=_mdf["value"],
+                mode="lines+markers",
+                line=dict(color=_trend_color, width=2.5),
+                marker=dict(size=4, color=_trend_color),
+                fill="tozeroy", fillcolor=_fill_color,
+                name=title,
+                hovertemplate=f"<b>%{{x}}</b><br>{title}: %{{y:{_tick}}}<extra></extra>",
             ))
         fig.update_layout(
-            title=dict(text=title, font=dict(size=12, color=JPSI_DARK), x=0, pad=dict(l=0)),
-            height=280, paper_bgcolor="white", plot_bgcolor="white",
-            showlegend=False, margin=dict(l=50, r=14, t=38, b=28),
-            xaxis=dict(showgrid=False, tickfont=dict(size=9)),
-            yaxis=dict(gridcolor="#f0f0f0",
-                       tickformat=".1f" if yield_fmt else ",.0f",
-                       tickfont=dict(size=9)),
+            title=dict(text=title, font=dict(size=13, color=JPSI_DARK), x=0),
+            height=320, paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False, margin=dict(l=55, r=14, t=44, b=36),
+            xaxis=dict(showgrid=False, tickfont=dict(size=9, color="#6b7280"),
+                       linecolor="#e5e7eb"),
+            yaxis=dict(gridcolor="#e5e7eb", tickformat=_tick,
+                       tickfont=dict(size=9, color="#6b7280"), linecolor="#e5e7eb"),
             hovermode="x unified",
         )
         return fig
 
-    # ── Historical trends ─────────────────────────────────────────────────────
-    st.markdown("<hr>", unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="sh">Historical Trends — {_dt_comm} (New York State)</div>',
-        unsafe_allow_html=True,
-    )
-
-    _CORN_COLOR = "#d97706"
-    _SOY_COLOR  = JPSI_BLUE
-    _COMM_COLORS = {
-        "Corn": _CORN_COLOR, "Soybeans": _SOY_COLOR,
-        "Dairy Cows": "#5ba5af", "All Cattle & Calves": JPSI_DARK, "Hogs & Pigs": "#8b5cf6",
-    }
-    _trend_color = _COMM_COLORS.get(_dt_comm, JPSI_BLUE)
-
-    if _dt_comm in _DT_CROPS:
-        # 2×2 grid for all 4 metrics
-        _all_metrics = list(_DT_CROPS[_dt_comm].items())
-        _tc1, _tc2 = st.columns(2)
-        _tc3, _tc4 = st.columns(2)
-        _tcols = [_tc1, _tc2, _tc3, _tc4]
-        for _ti, (_mlbl, _mparams) in enumerate(_all_metrics):
-            _tdf = _dt_fetch_ny(
-                commodity_desc=_mparams["commodity_desc"],
-                statisticcat_desc=_mparams["statisticcat_desc"],
-                unit_desc=_mparams["unit_desc"],
-                util_practice_desc=_mparams.get("util_practice_desc", ""),
-                class_desc=_mparams.get("class_desc", ""),
-            )
-            with _tcols[_ti]:
+    if _dt_is_crop:
+        _tr1, _tr2 = st.columns(2)
+        _tr3, _tr4 = st.columns(2)
+        _trcols = [_tr1, _tr2, _tr3, _tr4]
+        for _ti, _mlbl in enumerate(_dt_mlist):
+            with _trcols[_ti]:
                 st.plotly_chart(
-                    _dt_chart(_tdf, f"{_dt_comm} — {_mlbl} (NY)", _trend_color,
-                              yield_fmt="Yield" in _mlbl),
+                    _dt_trend_fig(_dt_series[_mlbl], f"{_dt_comm} — {_mlbl} (NY)", _dt_yr_range),
                     use_container_width=True,
                 )
     else:
-        # Single trend chart for livestock
+        _mlbl0 = _dt_mlist[0]
         st.plotly_chart(
-            _dt_chart(_dt_state_df, f"{_dt_comm} — {_dt_metric} (NY)", _trend_color),
+            _dt_trend_fig(_dt_series[_mlbl0], f"{_dt_comm} — {_mlbl0} (NY)", _dt_yr_range),
             use_container_width=True,
         )
 
-    # ── Livestock overview (always shown) ─────────────────────────────────────
-    if _dt_comm in _DT_CROPS:
+    # ── County / ASD section ──────────────────────────────────────────────────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sh">County / ASD Map</div>', unsafe_allow_html=True)
+
+    _ctrl_a, _ctrl_b = st.columns([5, 2])
+    with _ctrl_a:
+        _prod_dflt = next((m for m in _dt_mlist if "Production" in m), _dt_mlist[0])
+        _dt_cmetric = st.radio(
+            "County metric", _dt_mlist,
+            index=_dt_mlist.index(_prod_dflt),
+            horizontal=True, label_visibility="collapsed",
+            key=f"dt_cmetric_{_dt_comm}",
+        )
+    with _ctrl_b:
+        _dt_cyr = st.selectbox("Year", list(range(2024, 2013, -1)), key="dt_cyr",
+                               index=list(range(2024, 2013, -1)).index(_dt_map_yr))
+
+    with st.spinner("Loading county data from NASS cache..."):
+        _dt_cdf = _dt_load_county_ny(_dt_comm, _dt_cmetric, _dt_cyr)
+
+    if _dt_cdf.empty:
+        st.info(
+            f"County-level data for **{_dt_comm} — {_dt_cmetric} ({_dt_cyr})** is not yet "
+            "in the NASS cache. State-level trend data is shown above.",
+            icon="ℹ️",
+        )
+    else:
+        # ASD view toggle (only if data has ASD fields)
+        _has_asd = "asd_desc" in _dt_cdf.columns and _dt_cdf["asd_desc"].notna().any()
+        _asd_view = False
+        if _has_asd:
+            _view_mode = st.radio(
+                "View", ["County", "ASD Districts"],
+                horizontal=True, label_visibility="collapsed",
+                key="dt_view_mode",
+            )
+            _asd_view = _view_mode == "ASD Districts"
+
+        # Summary KPI cards
+        _is_yld_c = "Yield" in _dt_cmetric
+        _summ_val = _dt_cdf["Value"].mean() if _is_yld_c else _dt_cdf["Value"].sum()
+        _n_ctys   = _dt_cdf["fips"].nunique()
+        _unit_lbl = ("Bu/Ac" if _is_yld_c
+                     else ("Ac" if "Acres" in _dt_cmetric
+                           else ("Head" if "Head" in _dt_cmetric else "Bu")))
+        _val_str  = f"{_summ_val:,.1f}" if _is_yld_c else f"{_summ_val:,.0f}"
+        _kc1, _kc2, _ = st.columns([1, 1, 4])
+        _card_css = ("background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;"
+                     "padding:12px 16px;")
+        _lbl_css  = "font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em;"
+        _val_css  = "font-size:22px;font-weight:700;color:#111827;margin-top:4px;"
+        _unit_css = "font-size:13px;color:#6b7280;"
+        with _kc1:
+            st.markdown(
+                f"<div style='{_card_css}'><div style='{_lbl_css}'>{'Avg Yield' if _is_yld_c else 'Total'}</div>"
+                f"<div style='{_val_css}'>{_val_str} <span style='{_unit_css}'>{_unit_lbl}</span></div></div>",
+                unsafe_allow_html=True,
+            )
+        with _kc2:
+            st.markdown(
+                f"<div style='{_card_css}'><div style='{_lbl_css}'>Counties Reporting</div>"
+                f"<div style='{_val_css}'>{_n_ctys:,}</div></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
+        # Map
+        try:
+            with st.spinner("Rendering map..."):
+                _dt_geo = _dt_load_geojson()
+                if _asd_view:
+                    _map_fig = _dt_asd_fig(_dt_cdf, _dt_geo, _dt_cmetric)
+                else:
+                    _map_fig = _dt_county_fig(_dt_cdf, _dt_geo, _dt_cmetric)
+            st.plotly_chart(_map_fig, use_container_width=True)
+        except Exception as _me:
+            st.warning(f"Map render failed: {_me}")
+
+        # Data table
+        with st.expander("Data table", expanded=False):
+            if _asd_view and _has_asd:
+                _agg_m = "mean" if _is_yld_c else "sum"
+                _tbl_c = (
+                    _dt_cdf.groupby(
+                        [c for c in ["asd_code", "asd_desc"] if c in _dt_cdf.columns],
+                        as_index=False,
+                    )["Value"].agg(_agg_m)
+                    .rename(columns={"asd_desc": "District", "asd_code": "Code"})
+                )
+                _tbl_c = _tbl_c.sort_values("Code") if "Code" in _tbl_c.columns else _tbl_c
+            else:
+                _tbl_c = _dt_cdf[["County", "Value"]].copy()
+                _tbl_c.columns = ["County", _dt_cmetric]
+                _tbl_c = _tbl_c.sort_values(_dt_cmetric, ascending=False)
+            st.dataframe(_tbl_c.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    # ── Livestock overview (shown when a crop is selected) ────────────────────
+    if _dt_is_crop:
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown('<div class="sh">Livestock Inventory — New York</div>', unsafe_allow_html=True)
-        _dt_dairy  = _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
-                                  reference_period_desc="FIRST OF JAN",
-                                  class_desc="COWS", util_practice_desc="MILK")
-        _dt_cattle = _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
-                                  reference_period_desc="FIRST OF JAN",
-                                  class_desc="ALL CLASSES")
-        _dt_hogs   = _dt_fetch_ny("HOGS",   "INVENTORY", "HEAD",
-                                  reference_period_desc="FIRST OF DEC")
+        _lv_data = {
+            "Dairy Cows":          _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
+                                                reference_period_desc="FIRST OF JAN",
+                                                class_desc="COWS", util_practice_desc="MILK"),
+            "All Cattle & Calves": _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
+                                                reference_period_desc="FIRST OF JAN",
+                                                class_desc="ALL CLASSES"),
+            "Hogs & Pigs":         _dt_fetch_ny("HOGS",   "INVENTORY", "HEAD",
+                                                reference_period_desc="FIRST OF DEC"),
+        }
         _lv_c1, _lv_c2, _lv_c3 = st.columns(3)
-        with _lv_c1:
-            st.plotly_chart(
-                _dt_chart(_dt_dairy,  "Dairy Cows — Jan 1 (NY)", "#5ba5af"),
-                use_container_width=True,
-            )
-        with _lv_c2:
-            st.plotly_chart(
-                _dt_chart(_dt_cattle, "All Cattle & Calves — Jan 1 (NY)", JPSI_DARK),
-                use_container_width=True,
-            )
-        with _lv_c3:
-            st.plotly_chart(
-                _dt_chart(_dt_hogs,   "Hogs & Pigs — Dec 1 (NY)", "#8b5cf6"),
-                use_container_width=True,
-            )
-        st.caption("Livestock: USDA NASS annual surveys. Jan 1 cattle, Dec 1 hogs.")
+        for (_lname, _ldf), _lcol in zip(_lv_data.items(), [_lv_c1, _lv_c2, _lv_c3]):
+            _lcolor = _DT_COLORS[_lname]
+            _lfill  = _DT_FILLS[_lname]
+            _lref   = "Dec 1" if _lname == "Hogs & Pigs" else "Jan 1"
+            with _lcol:
+                _lfig = go.Figure()
+                _ldf2 = _ldf[_ldf["year"].between(_dt_yr_range[0], _dt_yr_range[1])] if not _ldf.empty else _ldf
+                if _ldf2.empty:
+                    _lfig.add_annotation(text="No data", showarrow=False, font=dict(size=11, color="#9ca3af"))
+                else:
+                    _lfig.add_trace(go.Scatter(
+                        x=_ldf2["year"].astype(int), y=_ldf2["value"],
+                        mode="lines+markers",
+                        line=dict(color=_lcolor, width=2.5),
+                        marker=dict(size=4, color=_lcolor),
+                        fill="tozeroy", fillcolor=_lfill,
+                        hovertemplate=f"<b>%{{x}}</b><br>Inventory: %{{y:,.0f}}<extra></extra>",
+                    ))
+                _lfig.update_layout(
+                    title=dict(text=f"{_lname} — {_lref} (NY)", font=dict(size=12, color=JPSI_DARK), x=0),
+                    height=280, paper_bgcolor="white", plot_bgcolor="white",
+                    showlegend=False, margin=dict(l=55, r=14, t=40, b=32),
+                    xaxis=dict(showgrid=False, tickfont=dict(size=9, color="#6b7280"), linecolor="#e5e7eb"),
+                    yaxis=dict(gridcolor="#e5e7eb", tickformat=",.0f",
+                               tickfont=dict(size=9, color="#6b7280"), linecolor="#e5e7eb"),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(_lfig, use_container_width=True)
+        st.caption("Livestock: USDA NASS annual surveys. Jan 1 cattle/dairy, Dec 1 hogs.")
