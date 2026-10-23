@@ -237,7 +237,7 @@ class NYCrop:
         return {y: self.state_total(stat, y, adj) for y in sorted(YEARS)}
 
     def forecast_state(self, stat: str, adj: Adj = Adj()):
-        """Current-year NY value from any reference period (preferring the June acreage report)."""
+        """Current-year NY value from any reference period (preferring NASS's latest in-season YEAR row)."""
         g = self._groups.get(("f", stat, FORECAST_YEAR))
         if g is None or g.empty:
             return None
@@ -245,7 +245,8 @@ class NYCrop:
         g = g.dropna(subset=["val"])
         if g.empty:
             return None
-        pref = {"YEAR - JUN ACREAGE": 0, "YEAR": 1, "YEAR - MAR ACREAGE": 2}
+        # The YEAR row moves with each monthly report; the Jun/Mar Acreage rows are frozen snapshots.
+        pref = {"YEAR": 0, "YEAR - JUN ACREAGE": 1, "YEAR - MAR ACREAGE": 2}
         g = g.assign(_p=g["ref_period"].map(lambda x: pref.get(x, 99))).sort_values("_p")
         return float(g.iloc[0]["val"]) * self._ho(stat, adj)
 
@@ -433,6 +434,12 @@ class NYCrop:
         sh_pl = self.asd_hist_shares("planted", hist, adj)
         sh_hv = self.asd_hist_shares("harvested", hist, adj)
         sh_pr = self.asd_hist_shares("production", hist, adj)
+
+        def _norm(sh: dict) -> dict:
+            # Per-district olympic averages don't sum to 1; rescale so districts add to the state figure.
+            tot = sum(sh.values())
+            return {d: v / tot for d, v in sh.items()} if tot > 0 else sh
+        sh_pl, sh_hv, sh_pr = _norm(sh_pl), _norm(sh_hv), _norm(sh_pr)
         stats: dict = {k: {} for k in ("planted", "harvested", "pct_harvested", "production", "yield")}
         for d in set(sh_pl) | set(sh_hv) | set(sh_pr):
             apl = st_pl * sh_pl[d] if (d in sh_pl and st_pl) else None
