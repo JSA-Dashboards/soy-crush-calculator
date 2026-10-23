@@ -118,40 +118,46 @@ _CRUSH_POS_DEFAULTS: dict = {
 }
 
 
+def _normalize_pos(data: dict) -> dict:
+    """Bring a position of any saved generation up to the current shape (raises if it isn't a position)."""
+    if not isinstance(data, dict):
+        raise ValueError("not a position file (expected a JSON object)")
+    # Migrate old single-location format → two-location format
+    if "bean_opening" in data and "us_bean_opening" not in data:
+        data["us_bean_opening"] = data.pop("bean_opening", 0.0)
+        old_p = data.pop("bean_priced",   [0.0] * _POS_N)
+        old_u = data.pop("bean_unpriced", [0.0] * _POS_N)
+        data["us_bean_arrive"] = [p + u for p, u in zip(old_p, old_u)]
+    # Migrate priced+unpriced → combined arrive if old two-column format
+    if "us_bean_priced" in data and "us_bean_arrive" not in data:
+        data["us_bean_arrive"] = [
+            p + u for p, u in zip(data.pop("us_bean_priced", [0.0] * _POS_N),
+                                   data.pop("us_bean_unpriced", [0.0] * _POS_N))
+        ]
+    if "york_bean_priced" in data and "york_bean_arrive" not in data:
+        data["york_bean_arrive"] = [
+            p + u for p, u in zip(data.pop("york_bean_priced", [0.0] * _POS_N),
+                                   data.pop("york_bean_unpriced", [0.0] * _POS_N))
+        ]
+    # Migrate combined crush_bu → per-plant keys
+    if "crush_bu" in data and "us_crush_bu" not in data:
+        data["us_crush_bu"]   = data.pop("crush_bu")
+        data["york_crush_bu"] = [0.0] * _POS_N
+    # Drop the old combined key if it somehow still exists
+    data.pop("crush_bu", None)
+    # Fill any missing keys from defaults
+    for k, v in _CRUSH_POS_DEFAULTS.items():
+        if k not in data:
+            data[k] = list(v) if isinstance(v, list) else v
+        elif isinstance(v, list) and len(data[k]) != _POS_N:
+            data[k] = (data[k] + [0.0] * _POS_N)[:_POS_N]
+    return data
+
+
 def _load_crush_pos() -> dict:
     try:
         sf = _sf_load_crush_pos()
-        data = sf if sf is not None else json.loads(_CRUSH_POS_FILE.read_text())
-        # Migrate old single-location format → two-location format
-        if "bean_opening" in data and "us_bean_opening" not in data:
-            data["us_bean_opening"] = data.pop("bean_opening", 0.0)
-            old_p = data.pop("bean_priced",   [0.0] * _POS_N)
-            old_u = data.pop("bean_unpriced", [0.0] * _POS_N)
-            data["us_bean_arrive"] = [p + u for p, u in zip(old_p, old_u)]
-        # Migrate priced+unpriced → combined arrive if old two-column format
-        if "us_bean_priced" in data and "us_bean_arrive" not in data:
-            data["us_bean_arrive"] = [
-                p + u for p, u in zip(data.pop("us_bean_priced", [0.0] * _POS_N),
-                                       data.pop("us_bean_unpriced", [0.0] * _POS_N))
-            ]
-        if "york_bean_priced" in data and "york_bean_arrive" not in data:
-            data["york_bean_arrive"] = [
-                p + u for p, u in zip(data.pop("york_bean_priced", [0.0] * _POS_N),
-                                       data.pop("york_bean_unpriced", [0.0] * _POS_N))
-            ]
-        # Migrate combined crush_bu → per-plant keys
-        if "crush_bu" in data and "us_crush_bu" not in data:
-            data["us_crush_bu"]   = data.pop("crush_bu")
-            data["york_crush_bu"] = [0.0] * _POS_N
-        # Drop the old combined key if it somehow still exists
-        data.pop("crush_bu", None)
-        # Fill any missing keys from defaults
-        for k, v in _CRUSH_POS_DEFAULTS.items():
-            if k not in data:
-                data[k] = list(v) if isinstance(v, list) else v
-            elif isinstance(v, list) and len(data[k]) != _POS_N:
-                data[k] = (data[k] + [0.0] * _POS_N)[:_POS_N]
-        return data
+        return _normalize_pos(sf if sf is not None else json.loads(_CRUSH_POS_FILE.read_text()))
     except Exception:
         return {k: (list(v) if isinstance(v, list) else v)
                 for k, v in _CRUSH_POS_DEFAULTS.items()}
@@ -163,6 +169,29 @@ def _save_crush_pos(data: dict) -> None:
     except Exception:
         pass
     _sf_save_crush_pos(data)
+
+
+# Keyed widgets keep their own state and write it straight back into the position, so whenever the
+# position is replaced (file restore) or filled in (CH Basis import) their state has to be dropped,
+# or the stale boxes overwrite the new numbers.
+_POS_WIDGET_KEYS = (
+    "us_opening_in", "us_capacity_in", "york_opening_in", "york_capacity_in",
+    "meal_opening_in", "oil_opening_in",
+    "us_supply_editor", "york_supply_editor", "crush_schedule_editor",
+    "meal_sales_editor", "oil_sales_editor",
+)
+
+
+def _reset_position_widgets() -> None:
+    for k in _POS_WIDGET_KEYS:
+        st.session_state.pop(k, None)
+
+
+def _apply_position(data: dict) -> None:
+    """Make `data` the working position (and persist it) so every input on the tab shows it."""
+    st.session_state["crush_pos"] = data
+    _reset_position_widgets()
+    _save_crush_pos(data)
 
 
 # ── Snowflake persistence ─────────────────────────────────────────────────────
@@ -351,13 +380,15 @@ def _parse_ch_report(text: str) -> dict:
             nums = re.findall(r"[\d,]+", s)
             if nums:
                 result["basis_position"] = int(nums[0].replace(",", ""))
-        # Location-specific rows (basis position or unpriced by location)
+        # Location-specific rows (basis position or unpriced by location). The location code in
+        # parentheses, e.g. "UNION SPRINGS (100)  444,147", is not a quantity.
+        s_qty = re.sub(r"\(\s*\d+\s*\)", " ", s)
         if re.search(r"UNION\s+SPRINGS", s, re.IGNORECASE):
-            nums = re.findall(r"[\d,]+", s)
+            nums = re.findall(r"\d[\d,]*", s_qty)
             if nums:
                 result["union_springs_total"] = int(nums[0].replace(",", ""))
         if re.search(r"YORK", s, re.IGNORECASE) and "NEW YORK" not in s.upper():
-            nums = re.findall(r"[\d,]+", s)
+            nums = re.findall(r"\d[\d,]*", s_qty)
             if nums:
                 result["york_total"] = int(nums[0].replace(",", ""))
     return result
@@ -1528,8 +1559,7 @@ extruder yield parameters set in the sidebar.
                     _apply_by_month("us_bean_arrive",   _ex.get("us_by_month", {}))
                     _apply_by_month("york_bean_arrive", _ex.get("york_by_month", {}))
 
-                    st.session_state["crush_pos"] = cp
-                    _save_crush_pos(cp)
+                    _apply_position(cp)
 
                     # Show what was extracted
                     _preview = {
@@ -1563,8 +1593,7 @@ extruder yield parameters set in the sidebar.
                         cp["us_bean_opening"] = float(parsed["total_stock"])
                     if "york_total" in parsed:
                         cp["york_bean_opening"] = float(parsed["york_total"])
-                    st.session_state["crush_pos"] = cp
-                    _save_crush_pos(cp)
+                    _apply_position(cp)
                     detail = " · ".join(
                         f"{k.replace('_', ' ').title()}: {v:,}" for k, v in parsed.items()
                     )
@@ -1581,24 +1610,20 @@ extruder yield parameters set in the sidebar.
             "Upload crush_position.json", type="json", key="crush_pos_upload",
         )
         if _upload is not None:
-            try:
-                _uploaded_data = json.loads(_upload.read().decode())
-                # Run through the same migration + fill logic
-                if "crush_bu" in _uploaded_data and "us_crush_bu" not in _uploaded_data:
-                    _uploaded_data["us_crush_bu"]   = _uploaded_data.pop("crush_bu")
-                    _uploaded_data["york_crush_bu"] = [0.0] * _POS_N
-                _uploaded_data.pop("crush_bu", None)
-                for _k, _v in _CRUSH_POS_DEFAULTS.items():
-                    if _k not in _uploaded_data:
-                        _uploaded_data[_k] = list(_v) if isinstance(_v, list) else _v
-                    elif isinstance(_v, list) and len(_uploaded_data[_k]) != _POS_N:
-                        _uploaded_data[_k] = (_uploaded_data[_k] + [0.0] * _POS_N)[:_POS_N]
-                st.session_state["crush_pos"] = _uploaded_data
-                _save_crush_pos(_uploaded_data)
-                st.success("Position restored from file — data populated above.")
-                st.rerun()
-            except Exception as _e:
-                st.error(f"Could not parse file: {_e}")
+            # The uploader keeps its file across reruns; apply each upload once, or it would be
+            # re-applied (and the page re-run) forever, wiping any edits made afterwards.
+            _upload_sig = getattr(_upload, "file_id", None) or f"{_upload.name}:{_upload.size}"
+            if st.session_state.get("crush_pos_upload_sig") != _upload_sig:
+                try:
+                    _uploaded_data = _normalize_pos(json.loads(_upload.getvalue().decode("utf-8-sig")))
+                    _apply_position(_uploaded_data)
+                    st.session_state["crush_pos_upload_sig"] = _upload_sig
+                    st.session_state["crush_pos_upload_msg"] = f"Position restored from {_upload.name}."
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Could not read this file as a saved position: {_e}")
+            else:
+                st.success(st.session_state.get("crush_pos_upload_msg", "Position restored from file."))
 
     # ── Soybean Supply by Location ────────────────────────────────────────────
 
