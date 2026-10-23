@@ -169,9 +169,18 @@ def _save_crush_pos(data: dict) -> None:
 
 def _sf_secret(name: str) -> str:
     try:
-        return st.secrets.get(name, "") or ""
+        v = st.secrets.get(name, "")
+        if v:
+            return str(v)
+        # Tolerate settings pasted under a [section] header in the Cloud secrets.
+        for sec in st.secrets.values():
+            if hasattr(sec, "get") and not isinstance(sec, str):
+                v = sec.get(name, "")
+                if v:
+                    return str(v)
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _sf_private_key():
@@ -253,122 +262,15 @@ def _sf_save_crush_pos(data: dict) -> None:
         pass
 
 
-# ── NASS cache helpers (Draw Territory) ──────────────────────────────────────
+# ── NASS data access (Draw Territory) ────────────────────────────────────────
+# Live JSA.NASS_CACHE first; the bundled NY snapshot (dt_ny_snapshot.json, built by
+# build_dt_snapshot.py) when the live cache can't be reached. Keys/parsing: dt_nass.py.
 
-def _nass_cache_key(params: dict) -> str:
-    ignored = {"key", "format"}
-    clean = {k: str(v) for k, v in params.items() if k not in ignored}
-    canon = json.dumps(clean, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(f"api_GET|{canon}".encode()).hexdigest()
+import dt_nass as _nass
 
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _dt_fetch_ny(
-    commodity_desc: str,
-    statisticcat_desc: str,
-    unit_desc: str,
-    reference_period_desc: str = "YEAR",
-    year__GE: str = "1980",
-    util_practice_desc: str = "",
-    class_desc: str = "",
-) -> pd.DataFrame:
-    """Fetch NY state data from JSA.NASS_CACHE. Returns year/value DataFrame.
-
-    Cache key matches _broad_metric_params() in domestic-production-dashboard:
-    reference_period_desc is STRIPPED from the key (ETL caches all periods together);
-    domain_desc=TOTAL and freq_desc=ANNUAL are REQUIRED.
-    reference_period_desc is used only for post-fetch filtering.
-    """
-    # Build params exactly as _broad_metric_params does in domestic-production-dashboard
-    params: dict = {
-        "commodity_desc": commodity_desc,
-        "statisticcat_desc": statisticcat_desc,
-        "unit_desc": unit_desc,
-        "source_desc": "SURVEY",
-        "domain_desc": "TOTAL",    # required — ETL always includes this
-        "freq_desc": "ANNUAL",     # required — ETL always includes this
-        "agg_level_desc": "STATE",
-        "year__GE": year__GE,
-    }
-    if util_practice_desc:
-        params["util_practice_desc"] = util_practice_desc
-    if class_desc:
-        params["class_desc"] = class_desc
-    # reference_period_desc intentionally excluded from cache key
-    ck = _nass_cache_key(params)
-    try:
-        conn = _sf_connect()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT data FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s LIMIT 1",
-            (ck,),
-        )
-        row = cur.fetchone()
-        conn.close()
-    except Exception:
-        return pd.DataFrame()
-    if not row:
-        return pd.DataFrame()
-    try:
-        raw = row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
-        records = raw.get("data", []) if isinstance(raw, dict) else raw
-        df = pd.DataFrame(records)
-        if "state_alpha" in df.columns:
-            df = df[df["state_alpha"] == "NY"]
-        # Filter by reference_period_desc post-fetch (livestock needs FIRST OF JAN / DEC)
-        if "reference_period_desc" in df.columns:
-            rp = reference_period_desc.upper()
-            rp_matches = df[df["reference_period_desc"].str.upper() == rp]
-            if not rp_matches.empty:
-                df = rp_matches
-            elif rp != "YEAR":
-                # Requested period not found — fall back to YEAR rows
-                yr_rows = df[df["reference_period_desc"].str.upper() == "YEAR"]
-                if not yr_rows.empty:
-                    df = yr_rows
-        df["year"] = pd.to_numeric(df.get("year", pd.Series(dtype=float)), errors="coerce")
-        df["value"] = pd.to_numeric(
-            df.get("Value", pd.Series(dtype=str)).astype(str).str.replace(",", ""),
-            errors="coerce",
-        )
-        return (
-            df.dropna(subset=["year", "value"])[["year", "value"]]
-            .sort_values("year").reset_index(drop=True)
-        )
-    except Exception:
-        return pd.DataFrame()
-
-
-# ── Draw Territory commodity/metric config ────────────────────────────────────
-
-_DT_CROPS: dict = {
-    "Corn": {
-        "Planted Acres":   {"commodity_desc": "CORN", "statisticcat_desc": "AREA PLANTED",  "unit_desc": "ACRES",     "source_desc": "SURVEY"},
-        "Harvested Acres": {"commodity_desc": "CORN", "statisticcat_desc": "AREA HARVESTED","unit_desc": "ACRES",     "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
-        "Yield (Bu/Ac)":   {"commodity_desc": "CORN", "statisticcat_desc": "YIELD",         "unit_desc": "BU / ACRE", "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
-        "Production (Bu)": {"commodity_desc": "CORN", "statisticcat_desc": "PRODUCTION",    "unit_desc": "BU",        "source_desc": "SURVEY", "util_practice_desc": "GRAIN"},
-    },
-    "Soybeans": {
-        "Planted Acres":   {"commodity_desc": "SOYBEANS", "statisticcat_desc": "AREA PLANTED",  "unit_desc": "ACRES",     "source_desc": "SURVEY"},
-        "Harvested Acres": {"commodity_desc": "SOYBEANS", "statisticcat_desc": "AREA HARVESTED","unit_desc": "ACRES",     "source_desc": "SURVEY"},
-        "Yield (Bu/Ac)":   {"commodity_desc": "SOYBEANS", "statisticcat_desc": "YIELD",         "unit_desc": "BU / ACRE", "source_desc": "SURVEY"},
-        "Production (Bu)": {"commodity_desc": "SOYBEANS", "statisticcat_desc": "PRODUCTION",    "unit_desc": "BU",        "source_desc": "SURVEY"},
-    },
-}
-
-_DT_LIVESTOCK: dict = {
-    "Dairy Cows": {
-        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "COWS",        "util_practice_desc": "MILK", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF JAN"},
-    },
-    "All Cattle & Calves": {
-        "Inventory (Head)": {"commodity_desc": "CATTLE", "class_desc": "ALL CLASSES", "statisticcat_desc": "INVENTORY", "unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF JAN"},
-    },
-    "Hogs & Pigs": {
-        "Inventory (Head)": {"commodity_desc": "HOGS", "statisticcat_desc": "INVENTORY","unit_desc": "HEAD", "source_desc": "SURVEY", "reference_period_desc": "FIRST OF DEC"},
-    },
-}
-
-_DT_ALL_COMMS: dict = {**_DT_CROPS, **_DT_LIVESTOCK}
+_DT_CROPS: dict = _nass.CROPS
+_DT_LIVESTOCK: dict = _nass.LIVESTOCK
+_DT_ALL_COMMS: dict = _nass.ALL
 
 # Light-card palette for map / table (matches JPSI light theme)
 _DT_CARD = "#ffffff"
@@ -377,69 +279,76 @@ _DT_TXT  = "#111827"
 _DT_SEC  = "#6b7280"
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def _dt_load_county_ny(commodity: str, metric_label: str, year: int) -> pd.DataFrame:
-    """Load NY county NASS data from JSA.NASS_CACHE using the same key as the domestic-production-dashboard ETL."""
-    mp = _DT_ALL_COMMS.get(commodity, {}).get(metric_label)
-    if mp is None:
-        return pd.DataFrame()
-    # County params: strip reference_period_desc, add county-specific fields
-    params = {k: v for k, v in mp.items() if k != "reference_period_desc"}
-    params.update({
-        "domain_desc": "TOTAL",
-        "freq_desc": "ANNUAL",
-        "agg_level_desc": "COUNTY",
-        "year": str(year),
-    })
-    ck = _nass_cache_key(params)
+def _dt_missing_secrets() -> str:
+    """Names (never values) of the Snowflake settings this app cannot see."""
+    missing = [n for n in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER") if not _sf_secret(n)]
+    if not (_sf_secret("SNOWFLAKE_PRIVATE_KEY") or _sf_secret("SNOWFLAKE_PRIVATE_KEY_PATH")
+            or _sf_secret("SNOWFLAKE_PASSWORD")):
+        missing.append("SNOWFLAKE_PRIVATE_KEY")
+    return ", ".join(missing)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _dt_cache_records(params_json: str, state: str) -> list:
+    """NY records for one cached NASS query. Raises on any connection/query failure,
+    so a failure is never cached as an empty result."""
+    ck = _nass.cache_key(json.loads(params_json))
+    conn = _sf_connect()
     try:
-        conn = _sf_connect()
-        cur  = conn.cursor()
+        cur = conn.cursor()
         cur.execute("SELECT data FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s LIMIT 1", (ck,))
         row = cur.fetchone()
+    finally:
         conn.close()
-    except Exception:
-        return pd.DataFrame()
     if not row:
-        return pd.DataFrame()
+        return []
+    raw = row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
+    records = raw.get("data", []) if isinstance(raw, dict) else raw
+    return [r for r in records if r.get("state_alpha") == state]
+
+
+def _dt_live(params):
+    """Records from the live cache, or None when unreachable / not cached."""
+    if params is None:
+        return None
     try:
-        raw = row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
-        records = raw.get("data", []) if isinstance(raw, dict) else raw
-        df = pd.DataFrame(records)
-        # Filter to NY
-        if "state_alpha" in df.columns:
-            df = df[df["state_alpha"] == "NY"]
-        # Drop aggregate/other rows
-        if "county_ansi" in df.columns:
-            df = df[~df["county_ansi"].isin({"998", "000", "999"})]
-        if "county_name" in df.columns:
-            df = df[~df["county_name"].str.strip().str.lower().str.startswith("other")]
-        if df.empty:
-            return pd.DataFrame()
-        # Numeric value
-        df["Value"] = pd.to_numeric(
-            df["Value"].astype(str).str.replace(",", ""), errors="coerce"
-        )
-        df = df.dropna(subset=["Value"])
-        # FIPS
-        if "state_fips_code" in df.columns and "county_ansi" in df.columns:
-            df["fips"] = df["state_fips_code"].str.zfill(2) + df["county_ansi"].str.zfill(3)
-        else:
-            df["fips"] = ""
-        df["State"]  = df["state_alpha"].str.strip() if "state_alpha" in df.columns else "NY"
-        df["County"] = df["county_name"].str.strip().str.title() if "county_name" in df.columns else ""
-        # Prefer ALL PRODUCTION PRACTICES
-        key_cols = ["State", "County", "fips"]
-        if "prodn_practice_desc" in df.columns:
-            all_p = df[df["prodn_practice_desc"] == "ALL PRODUCTION PRACTICES"].copy()
-            rest  = df[~df["fips"].isin(all_p["fips"].unique())].copy()
-            if not rest.empty:
-                rest = rest.loc[rest.groupby(key_cols, sort=False)["Value"].idxmax()]
-            df = pd.concat([all_p, rest], ignore_index=True)
-        extra = [c for c in ["asd_desc", "asd_code"] if c in df.columns]
-        return df[key_cols + ["Value"] + extra].reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
+        return _dt_cache_records(json.dumps(params, sort_keys=True), "NY") or None
+    except Exception as e:
+        st.session_state["_dt_live_err"] = f"{type(e).__name__}: {str(e)[:160]}"
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _dt_snapshot() -> dict:
+    return _nass.load_snapshot()
+
+
+def _dt_series(comm: str, metric: str) -> pd.DataFrame:
+    """NY state series (year, value): live cache, else bundled snapshot."""
+    mp = _nass.ALL[comm][metric]
+    recs = _dt_live(_nass.state_params(mp))
+    if recs:
+        df = _nass.state_series(recs, mp)
+        if not df.empty:
+            return df
+    df = _nass.snap_state(_dt_snapshot(), comm, metric)
+    if not df.empty:
+        st.session_state["_dt_snap_used"] = True
+    return df
+
+
+def _dt_county(comm: str, metric: str, year: int) -> pd.DataFrame:
+    """NY county frame: live cache, else bundled snapshot. Empty when not cached."""
+    mp = _nass.ALL[comm][metric]
+    recs = _dt_live(_nass.county_params(mp, year))
+    if recs:
+        df = _nass.county_frame(recs)
+        if not df.empty:
+            return df
+    df = _nass.snap_county(_dt_snapshot(), comm, metric, year)
+    if not df.empty:
+        st.session_state["_dt_snap_used"] = True
+    return df
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -2458,16 +2367,22 @@ with tab_territory:
   </div>
 </div>""", unsafe_allow_html=True)
 
+    st.session_state["_dt_live_err"] = None
+    st.session_state["_dt_snap_used"] = False
+    _dt_status = st.empty()
+
     # ── Top filter bar ────────────────────────────────────────────────────────
+    _dt_ty = date.today().year
+    _dt_years = list(range(_dt_ty, 2014, -1))
     _fc1, _fc2, _fc3, _fc4 = st.columns([2, 3, 1, 0.5])
     with _fc1:
         _dt_comm = st.selectbox("Commodity", list(_DT_ALL_COMMS.keys()), key="dt_comm")
     with _fc2:
         _dt_yr_range = st.slider(
-            "Historical range", 1980, 2024, (1990, 2024), step=1, key="dt_yr_range",
+            "Historical range", 1980, _dt_ty, (1990, _dt_ty), step=1, key="dt_yr_range",
         )
     with _fc3:
-        _dt_map_yr = st.selectbox("Map year", list(range(2024, 2013, -1)), key="dt_map_yr")
+        _dt_map_yr = st.selectbox("Map year", _dt_years, index=1, key="dt_map_yr")
     with _fc4:
         st.markdown("<div style='margin-top:26px'></div>", unsafe_allow_html=True)
         if st.button("🔄", help="Clear cached data and reload", use_container_width=True, key="dt_refresh"):
@@ -2477,33 +2392,6 @@ with tab_territory:
     _dt_is_crop   = _dt_comm in _DT_CROPS
     _dt_comm_cfg  = _DT_ALL_COMMS[_dt_comm]
     _dt_mlist     = list(_dt_comm_cfg.keys())
-
-    # ── Temporary debug (remove once data confirmed working) ──────────────────
-    with st.expander("🔧 Debug — NASS cache connection test", expanded=False):
-        try:
-            _dbg_conn = _sf_connect()
-            _dbg_cur  = _dbg_conn.cursor()
-            _dbg_cur.execute("SELECT COUNT(*) FROM JSA.NASS_CACHE.nass_cache")
-            _dbg_cnt = _dbg_cur.fetchone()
-            st.success(f"Connected. Rows in JSA.NASS_CACHE.nass_cache: {_dbg_cnt[0]:,}")
-            # Show sample cache keys
-            _dbg_cur.execute("SELECT cache_key, LEFT(data::varchar, 60) FROM JSA.NASS_CACHE.nass_cache LIMIT 3")
-            _dbg_rows = _dbg_cur.fetchall()
-            st.write("Sample rows:", _dbg_rows)
-            # Show the key we're generating for corn planted acres
-            import hashlib as _hs, json as _js
-            _dbg_params = {"agg_level_desc": "STATE", "commodity_desc": "CORN",
-                           "domain_desc": "TOTAL", "freq_desc": "ANNUAL",
-                           "source_desc": "SURVEY", "statisticcat_desc": "AREA PLANTED",
-                           "unit_desc": "ACRES", "year__GE": "1980"}
-            _dbg_canon = _js.dumps(_dbg_params, sort_keys=True, separators=(",",":"))
-            _dbg_key = _hs.sha256(f"api_GET|{_dbg_canon}".encode()).hexdigest()
-            st.code(f"Expected key for Corn Planted Acres:\n{_dbg_key}")
-            _dbg_cur.execute("SELECT COUNT(*) FROM JSA.NASS_CACHE.nass_cache WHERE cache_key = %s", (_dbg_key,))
-            st.write("Rows matching that key:", _dbg_cur.fetchone()[0])
-            _dbg_conn.close()
-        except Exception as _dbg_e:
-            st.error(f"Connection/query error: {_dbg_e}")
 
     # ── Color palette ─────────────────────────────────────────────────────────
     _DT_COLORS = {
@@ -2524,16 +2412,7 @@ with tab_territory:
     _fill_color  = _DT_FILLS.get(_dt_comm, "rgba(6,147,227,0.12)")
 
     # ── Load state-level timeseries for all metrics ───────────────────────────
-    _dt_series: dict = {}
-    for _mlbl, _mp in _dt_comm_cfg.items():
-        _dt_series[_mlbl] = _dt_fetch_ny(
-            commodity_desc=_mp["commodity_desc"],
-            statisticcat_desc=_mp["statisticcat_desc"],
-            unit_desc=_mp["unit_desc"],
-            reference_period_desc=_mp.get("reference_period_desc", "YEAR"),
-            util_practice_desc=_mp.get("util_practice_desc", ""),
-            class_desc=_mp.get("class_desc", ""),
-        )
+    _dt_data: dict = {_m: _dt_series(_dt_comm, _m) for _m in _dt_mlist}
 
     # ── Value formatter (matches domestic-production-dashboard) ───────────────
     def _dt_fmt(v: float, metric: str) -> str:
@@ -2550,7 +2429,7 @@ with tab_territory:
     # ── KPI cards ─────────────────────────────────────────────────────────────
     _kpi_cols = st.columns(len(_dt_mlist), gap="small")
     for _ki, _mlbl in enumerate(_dt_mlist):
-        _mdf = _dt_series[_mlbl]
+        _mdf = _dt_data[_mlbl]
         _lbl_short = _mlbl.split("(")[0].strip()
         with _kpi_cols[_ki]:
             if _mdf.empty:
@@ -2621,13 +2500,13 @@ with tab_territory:
         for _ti, _mlbl in enumerate(_dt_mlist):
             with _trcols[_ti]:
                 st.plotly_chart(
-                    _dt_trend_fig(_dt_series[_mlbl], f"{_dt_comm} — {_mlbl} (NY)", _dt_yr_range),
+                    _dt_trend_fig(_dt_data[_mlbl], f"{_dt_comm} — {_mlbl} (NY)", _dt_yr_range),
                     use_container_width=True,
                 )
     else:
         _mlbl0 = _dt_mlist[0]
         st.plotly_chart(
-            _dt_trend_fig(_dt_series[_mlbl0], f"{_dt_comm} — {_mlbl0} (NY)", _dt_yr_range),
+            _dt_trend_fig(_dt_data[_mlbl0], f"{_dt_comm} — {_mlbl0} (NY)", _dt_yr_range),
             use_container_width=True,
         )
 
@@ -2645,16 +2524,18 @@ with tab_territory:
             key=f"dt_cmetric_{_dt_comm}",
         )
     with _ctrl_b:
-        _dt_cyr = st.selectbox("Year", list(range(2024, 2013, -1)), key="dt_cyr",
-                               index=list(range(2024, 2013, -1)).index(_dt_map_yr))
+        _dt_cyr = st.selectbox("Year", _dt_years, key="dt_cyr",
+                               index=_dt_years.index(_dt_map_yr))
 
     with st.spinner("Loading county data from NASS cache..."):
-        _dt_cdf = _dt_load_county_ny(_dt_comm, _dt_cmetric, _dt_cyr)
+        _dt_cdf = _dt_county(_dt_comm, _dt_cmetric, _dt_cyr)
 
     if _dt_cdf.empty:
         st.info(
-            f"County-level data for **{_dt_comm} — {_dt_cmetric} ({_dt_cyr})** is not yet "
-            "in the NASS cache. State-level trend data is shown above.",
+            f"No county-level data for **{_dt_comm} — {_dt_cmetric} ({_dt_cyr})**. NASS publishes "
+            "county figures only for harvested acres, yield and production (not planted acres or "
+            "livestock inventory), and the latest year may not be released yet. "
+            "State-level trends are shown above.",
             icon="ℹ️",
         )
     else:
@@ -2731,16 +2612,7 @@ with tab_territory:
     if _dt_is_crop:
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown('<div class="sh">Livestock Inventory — New York</div>', unsafe_allow_html=True)
-        _lv_data = {
-            "Dairy Cows":          _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
-                                                reference_period_desc="FIRST OF JAN",
-                                                class_desc="COWS", util_practice_desc="MILK"),
-            "All Cattle & Calves": _dt_fetch_ny("CATTLE", "INVENTORY", "HEAD",
-                                                reference_period_desc="FIRST OF JAN",
-                                                class_desc="ALL CLASSES"),
-            "Hogs & Pigs":         _dt_fetch_ny("HOGS",   "INVENTORY", "HEAD",
-                                                reference_period_desc="FIRST OF DEC"),
-        }
+        _lv_data = {_n: _dt_series(_n, "Inventory (Head)") for _n in _DT_LIVESTOCK}
         _lv_c1, _lv_c2, _lv_c3 = st.columns(3)
         for (_lname, _ldf), _lcol in zip(_lv_data.items(), [_lv_c1, _lv_c2, _lv_c3]):
             _lcolor = _DT_COLORS[_lname]
@@ -2771,3 +2643,19 @@ with tab_territory:
                 )
                 st.plotly_chart(_lfig, use_container_width=True)
         st.caption("Livestock: USDA NASS annual surveys. Jan 1 cattle/dairy, Dec 1 hogs.")
+
+    # ── Data-source status (filled last, once every load above has run) ───────
+    _dt_err = st.session_state.get("_dt_live_err")
+    _dt_snap_date = _dt_snapshot().get("generated", "n/a")
+    if _dt_err:
+        _dt_miss = _dt_missing_secrets()
+        _dt_status.warning(
+            f"**Live NASS cache not connected** — showing the bundled NY snapshot ({_dt_snap_date}).  \n"
+            f"`{_dt_err}`"
+            + (f"  \nMissing Snowflake settings in this app's secrets: **{_dt_miss}**" if _dt_miss else ""),
+            icon="⚠️",
+        )
+    elif st.session_state.get("_dt_snap_used"):
+        _dt_status.caption(f"Source: JSA NASS cache; some series from the bundled NY snapshot ({_dt_snap_date}).")
+    else:
+        _dt_status.caption("Source: JSA NASS cache (live).")
