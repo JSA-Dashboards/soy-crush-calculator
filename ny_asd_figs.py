@@ -1,0 +1,491 @@
+"""Plotly figure builders for the New York NASS Production view (no Streamlit import).
+
+Port of the NASS tab figures in rma-production-map, drawn from the static NY geometry in
+ny_asd_geo.json (county outlines, dissolved ASD district polygons, label centroids).
+"""
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+GEO_FILE = Path(__file__).with_name("ny_asd_geo.json")
+
+# Same tokens as the ASD dashboard
+DARK, PANEL, SURFACE = "#f6f8f7", "#ffffff", "#eef3f0"
+BORDER, TEXT, MUTED = "#d7e2dc", "#32373c", "#5f7267"
+ACCENT, LAND = "#5e7164", "#e1e9e4"
+SAGE_SEQ = [[0, "#f0f6f3"], [0.2, "#cfe6da"], [0.55, "#98d0b6"], [1, "#58a784"]]
+SAGE_DIV = [[0, "#b22222"], [0.25, "#e08080"], [0.5, "#f5f5f5"], [0.75, "#7dbfa7"], [1, "#1a6645"]]
+
+ASD_PALETTE = {"10": "#0693e3", "20": "#f59e0b", "30": "#ef4444", "40": "#a78bfa", "50": "#16a34a",
+               "60": "#fb923c", "70": "#38bdf8", "80": "#e879f9", "90": "#6366f1", "91": "#14b8a6"}
+
+
+def load_geo() -> dict:
+    return json.loads(GEO_FILE.read_text(encoding="utf-8"))
+
+
+# ── label formatters ──────────────────────────────────────────────────────────
+def fmt_bu(v):
+    return "" if pd.isna(v) or v == 0 else f"{v / 1_000_000:.1f}"
+
+
+def fmt_chg(v):
+    return "" if pd.isna(v) or abs(v) < 0.05 else f"{v:+.1f}%"
+
+
+def fmt_acres(v):
+    return "" if pd.isna(v) or v < 500 else f"{v / 1_000:,.0f}K"
+
+
+def fmt_yield(v):
+    return "" if pd.isna(v) or v == 0 else f"{v:.0f}"
+
+
+def auto_bu(mx: float) -> tuple:
+    if mx >= 500e6:
+        return 1e9, "B bu"
+    if mx >= 1e6:
+        return 1e6, "M bu"
+    if mx >= 1e3:
+        return 1e3, "K bu"
+    return 1, "bu"
+
+
+def auto_ac(mx: float) -> tuple:
+    if mx >= 500e3:
+        return 1e6, "M ac"
+    if mx >= 1e3:
+        return 1e3, "K ac"
+    return 1, "ac"
+
+
+def view_cfg(metric: str, change_view: str) -> dict:
+    if change_view != "Current Year":
+        return {"cscale": SAGE_DIV, "diverging": True, "clabel": "Change (%)", "hover_fmt": ":+.1f",
+                "hover_sfx": "%", "label_unit": "% chg", "label_fn": fmt_chg,
+                "rank_unit": "%", "rank_div": 1, "rank_fmt": "+.1f"}
+    bu = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_sfx": " bu", "label_unit": "M bu",
+          "label_fn": fmt_bu, "rank_unit": "M bu", "rank_div": 1_000_000, "rank_fmt": ",.2f"}
+    ac = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_sfx": " ac", "label_unit": "K ac",
+          "label_fn": fmt_acres, "rank_unit": "K ac", "rank_div": 1_000, "rank_fmt": ",.1f"}
+    return {
+        "Total Supply (bu)": {**bu, "clabel": "Total Supply<br>(bu)"},
+        "Production (bu)": {**bu, "clabel": "Production<br>(bu)"},
+        "Planted Acres": {**ac, "clabel": "Planted<br>Acres"},
+        "Harvested Acres": {**ac, "cscale": "BuGn", "clabel": "Harvested<br>Acres"},
+        "Prevent Plant Acres": {**ac, "clabel": "Prevent<br>Plant Acres"},
+        "Yield (bu/ac)": {"cscale": SAGE_DIV, "diverging": False, "clabel": "Yield<br>(bu/ac)", "hover_fmt": ":.1f",
+                          "hover_sfx": " bu/ac", "label_unit": "bu/ac", "label_fn": fmt_yield,
+                          "rank_unit": "bu/ac", "rank_div": 1, "rank_fmt": ".1f"},
+        "% Harvested": {"cscale": SAGE_DIV, "diverging": False, "clabel": "% Harvested", "hover_fmt": ":.1f",
+                        "hover_sfx": "%", "label_unit": "%", "label_fn": fmt_yield,
+                        "rank_unit": "%", "rank_div": 1, "rank_fmt": ".1f"},
+    }[metric]
+
+
+def _base_layout(title: str) -> dict:
+    return dict(paper_bgcolor=DARK, plot_bgcolor=SURFACE, font=dict(color=TEXT, family="Arial"),
+                title=dict(text=title, font=dict(size=15, color=ACCENT)), margin=dict(l=0, r=0, t=50, b=0))
+
+
+def map_height(geo: dict, min_h: int = 420, max_h: int = 820) -> int:
+    lats, lons = [], []
+
+    def walk(o):
+        if isinstance(o, list):
+            if o and isinstance(o[0], (int, float)):
+                lons.append(o[0])
+                lats.append(o[1])
+            else:
+                for i in o:
+                    walk(i)
+    for f in geo["counties"]["features"]:
+        walk(f["geometry"]["coordinates"])
+    if not lats:
+        return 620
+    adj_lon = (max(lons) - min(lons)) * math.cos(math.radians((max(lats) + min(lats)) / 2))
+    if adj_lon == 0:
+        return 620
+    return max(min_h, min(max_h, int(900 * ((max(lats) - min(lats)) / adj_lon) * 1.05)))
+
+
+def place_labels(fig, fips_list, values, centroids, label_fn):
+    areas = [centroids[f][2] for f in fips_list if f in centroids]
+    if areas:
+        avg_area = float(np.mean(areas))
+        size = int(np.clip(9 + np.log(max(avg_area, 0.01) / 0.05) * 2.0, 9, 15))
+    else:
+        avg_area, size = 0.1, 10
+    cands = []
+    for fips, val in zip(fips_list, values):
+        label = label_fn(val)
+        if label and fips in centroids:
+            cx, cy, area = centroids[fips]
+            cands.append((area, cx, cy, label))
+    cands.sort(reverse=True)
+    min_sep = float(np.clip(0.15 + avg_area * 0.8, 0.20, 0.45))
+    placed, lons, lats, texts = [], [], [], []
+    for area, cx, cy, label in cands:
+        if not any((cx - px) ** 2 + (cy - py) ** 2 < min_sep ** 2 for px, py in placed):
+            placed.append((cx, cy))
+            lons.append(cx)
+            lats.append(cy)
+            texts.append(label)
+    if lons:
+        fig.add_trace(go.Scattergeo(lon=lons, lat=lats, text=texts, mode="text",
+                                    textfont=dict(color="#4b5563", size=size, family="Arial Black"),
+                                    showlegend=False, hoverinfo="skip"))
+
+
+def _z_range(cfg, z_vals):
+    if cfg["diverging"]:
+        m = max(max((abs(v) for v in z_vals if not pd.isna(v)), default=1.0), 1.0)
+        return -m, m
+    pos = [v for v in z_vals if v and v > 0]
+    return (min(pos) if pos else 0), (max(pos) if pos else 1)
+
+
+# ── maps ──────────────────────────────────────────────────────────────────────
+def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str):
+    """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
+    if df is None or df.empty:
+        return None
+    cfg = view_cfg(metric, change_view)
+    view_label = metric if change_view == "Current Year" else f"{change_view} — {metric}"
+    counties = geo["counties"]
+    all_fips = [f["id"] for f in counties["features"]]
+    val = dict(zip(df["fips"], df["Value"]))
+    name = dict(zip(df["fips"], df["County"]))
+    est = dict(zip(df["fips"], df["is_estimated"]))
+    z, hover = [], []
+    for f in all_fips:
+        v = val.get(f)
+        z.append(v if v is not None and not pd.isna(v) else None)
+        lbl = name.get(f) or next((x["properties"]["NAME"] for x in counties["features"] if x["id"] == f), f)
+        sfx = " (Est)" if est.get(f) else ""
+        hover.append(f"{lbl}{sfx}: {cfg['label_fn'](v)}{cfg['hover_sfx']}" if v else f"{lbl}: No data")
+    z_min, z_max = _z_range(cfg, [v for v in z if v is not None])
+    line = dict(color="#a0b5c8", width=0.8)
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
+                                colorscale=[[0, PANEL], [1, PANEL]], showscale=False,
+                                marker=dict(line=line), hoverinfo="skip"))
+    fig.add_trace(go.Choropleth(
+        geojson=counties, featureidkey="id", locations=all_fips, z=z, colorscale=cfg["cscale"],
+        zmin=z_min, zmax=z_max, marker=dict(line=line), text=hover, hovertemplate="%{text}<extra></extra>",
+        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT)), tickfont=dict(color=TEXT))))
+    cents = geo["centroids"]
+    est_fips = [f for f in all_fips if est.get(f) and f in cents]
+    if est_fips:
+        fig.add_trace(go.Scattergeo(lon=[cents[f][0] for f in est_fips], lat=[cents[f][1] for f in est_fips],
+                                    mode="text", text=["Est"] * len(est_fips),
+                                    textfont=dict(color="#374151", size=7, family="Arial Bold"),
+                                    showlegend=False, hoverinfo="skip"))
+    rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and not est.get(f)]
+    place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"])
+    sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
+    fig.update_geos(fitbounds="locations", visible=False, bgcolor=DARK, landcolor=LAND)
+    fig.update_layout(**_base_layout(f"NASS {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>"),
+                      height=map_height(geo))
+    return fig
+
+
+def _exteriors(geom):
+    polys = [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
+    return [p[0] for p in polys]
+
+
+def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: str, year: int,
+                 metric: str, change_view: str, est_districts: set):
+    """Counties coloured by ASD district value, bold district boundaries, name + value labels."""
+    if view_df is None or view_df.empty:
+        return None
+    cfg = view_cfg(metric, change_view)
+    abs_cfg = view_cfg(metric, "Current Year")
+    view_label = metric if change_view == "Current Year" else f"{change_view} — {metric}"
+    dist_val = dict(zip(view_df["District"], view_df["Value"]))
+    raw_map = dict(zip(raw_df["District"], raw_df["Value"])) if raw_df is not None and not raw_df.empty else {}
+    dfeats = geo["districts"]["features"]
+    districts = [f["properties"]["District"] for f in dfeats]
+    z = [dist_val.get(d, 0) for d in districts]
+
+    def hover(d, zv):
+        rv = raw_map.get(d)
+        s = abs_cfg["label_fn"](rv) if rv is not None else ""
+        if change_view != "Current Year" and zv:
+            return f"<b>{d}</b><br>{s}<br>{'+' if zv >= 0 else ''}{zv:.1f}%"
+        return f"<b>{d}</b><br>{s}"
+
+    pos = [v for v in z if v > 0]
+    if cfg["diverging"]:
+        m = max(max((abs(v) for v in z), default=1.0), 1.0)
+        z_min, z_max = -m, m
+    else:
+        z_min, z_max = 0, (max(pos) if pos else 1)
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(
+        geojson=geo["districts"], featureidkey="properties.District", locations=districts, z=z,
+        colorscale=cfg["cscale"], zmin=z_min, zmax=z_max, marker=dict(line=dict(color=BORDER, width=0.3)),
+        colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT)), tickfont=dict(color=TEXT)),
+        text=[hover(d, v) for d, v in zip(districts, z)], hovertemplate="%{text}<extra></extra>"))
+    counties = geo["counties"]
+    cfips = [f["id"] for f in counties["features"]]
+    fig.add_trace(go.Choropleth(
+        geojson=counties, featureidkey="id", locations=cfips, z=[0] * len(cfips),
+        colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]], showscale=False,
+        marker=dict(line=dict(color="rgba(90,90,90,0.55)", width=0.5)), hoverinfo="skip"))
+    xs, ys, lons, lats, texts = [], [], [], [], []
+    for f in dfeats:
+        for ring in _exteriors(f["geometry"]):
+            xs += [p[0] for p in ring] + [None]
+            ys += [p[1] for p in ring] + [None]
+        d = f["properties"]["District"]
+        dv, rv = dist_val.get(d), raw_map.get(d)
+        rv_s = abs_cfg["label_fn"](rv) if rv is not None else ""
+        flag = "<br>Est" if d in est_districts else ""
+        if change_view != "Current Year" and dv is not None:
+            texts.append(f"{d.upper()}{flag}<br>{'+' if dv >= 0 else ''}{dv:.1f}%")
+        else:
+            texts.append(f"{d.upper()}{flag}<br>{rv_s}")
+        lons.append(f["properties"]["centroid_lon"])
+        lats.append(f["properties"]["centroid_lat"])
+    fig.add_trace(go.Scattergeo(lon=xs, lat=ys, mode="lines", line=dict(color="white", width=1.8),
+                                showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scattergeo(lon=lons, lat=lats, mode="text", text=texts,
+                                textfont=dict(color="black", size=9, family="Arial Black"),
+                                showlegend=False, hoverinfo="skip"))
+    fig.update_geos(fitbounds="locations", visible=False, bgcolor=DARK, landcolor=LAND, showframe=False)
+    fig.update_layout(**{**_base_layout(f"NASS {year} {crop} — {view_label} | New York AG Districts"),
+                         "height": map_height(geo), "geo": dict(showlakes=False)})
+    return fig
+
+
+# ── charts ────────────────────────────────────────────────────────────────────
+def history_bar(series: dict, years: list, title: str, y_label: str = "") -> go.Figure:
+    colors = ["#0693e3", "#f59e0b", "#ef4444", "#a78bfa", "#16a34a", "#fb923c", "#e879f9"]
+    fig = go.Figure()
+    for i, (name, vals) in enumerate(series.items()):
+        fig.add_trace(go.Bar(x=years, y=vals, name=name, marker_color=colors[i % len(colors)],
+                             marker_line_width=0, text=[f"{v:.2f}" for v in vals], textposition="outside",
+                             textfont=dict(color=TEXT, size=9), cliponaxis=False))
+    layout = _base_layout(title)
+    layout.update(height=320, barmode="group",
+                  legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center", font=dict(color=TEXT, size=10)),
+                  xaxis=dict(tickvals=years, ticktext=[str(y) for y in years], gridcolor=BORDER,
+                             tickfont=dict(color=MUTED)),
+                  yaxis=dict(title=y_label, gridcolor=BORDER, tickfont=dict(color=MUTED), title_font=dict(color=MUTED)),
+                  margin=dict(l=60, r=20, t=50, b=30))
+    fig.update_layout(**layout)
+    return fig
+
+
+def _rank_layout(fig, title, n, cfg, view_label, l_margin=10):
+    fig.update_layout(
+        paper_bgcolor=DARK, plot_bgcolor=SURFACE, font=dict(color=TEXT, family="Arial"),
+        title=dict(text=title, font=dict(size=14, color=ACCENT)),
+        height=max(380, n * 22 + 80), margin=dict(l=l_margin, r=90, t=50, b=20), bargap=0.18,
+        xaxis=dict(title=f"{view_label} ({cfg['rank_unit']})", gridcolor=BORDER, tickfont=dict(color=MUTED),
+                   title_font=dict(color=MUTED), zeroline=True, zerolinecolor=MUTED),
+        yaxis=dict(gridcolor=BORDER, tickfont=dict(color=TEXT, size=9), automargin=True))
+
+
+def ranking_chart(df: pd.DataFrame, crop: str, year: int, metric: str, change_view: str, by_district: bool = False):
+    """Horizontal county ranking; optionally grouped and coloured by ASD district."""
+    cfg = view_cfg(metric, change_view)
+    view_label = metric if change_view == "Current Year" else f"{change_view} — {metric}"
+    d = df.dropna(subset=["Value"]).copy()
+    if d.empty:
+        return go.Figure()
+    fmt = cfg["rank_fmt"]
+    raw_avg = d["Value"].mean()
+    avg_disp = raw_avg / cfg["rank_div"]
+    if by_district:
+        d = d.sort_values(["DistrictCode", "Value"]).reset_index(drop=True)
+        x = d["Value"] / cfg["rank_div"]
+        fig = go.Figure(go.Bar(
+            x=x, y=d["County"], orientation="h", marker_color=d["DistrictCode"].map(ASD_PALETTE).fillna(MUTED).tolist(),
+            marker_line_width=0, text=[f"{v:{fmt}}" for v in x], textposition="outside",
+            textfont=dict(color=TEXT, size=8), cliponaxis=False, customdata=d["District"].fillna("—").tolist(),
+            hovertemplate=f"%{{y}} — %{{customdata}}: %{{x:{fmt}}} {cfg['rank_unit']}<extra></extra>"))
+        cum = 0
+        for code in sorted(d["DistrictCode"].dropna().unique()):
+            grp = d[d["DistrictCode"] == code]
+            if cum > 0:
+                fig.add_hline(y=cum - 0.5, line_color=BORDER, line_width=1.5, line_dash="dot")
+            fig.add_annotation(x=0, y=cum + len(grp) / 2 - 0.5, xref="paper", yref="y",
+                               text=f"<b>{grp.iloc[0]['District'] or code}</b>",
+                               font=dict(color=ASD_PALETTE.get(code, MUTED), size=9), showarrow=False,
+                               xanchor="right", xshift=-72)
+            cum += len(grp)
+        title = f"New York County Rankings by AG District — {crop} {view_label} (NASS {year})"
+        margin = 165
+    else:
+        d = d.sort_values("Value", ascending=True)
+        x = d["Value"] / cfg["rank_div"]
+        fig = go.Figure(go.Bar(
+            x=x, y=d["County"], orientation="h",
+            marker_color=[ACCENT if v >= raw_avg else "#e05252" for v in d["Value"]], marker_line_width=0,
+            text=[f"{v:{fmt}}" for v in x], textposition="outside", textfont=dict(color=TEXT, size=8),
+            cliponaxis=False, hovertemplate=f"%{{y}}: %{{x:{fmt}}} {cfg['rank_unit']}<extra></extra>"))
+        title = f"New York County Rankings — {crop} {view_label} (NASS {year})"
+        margin = 10
+    fig.add_vline(x=avg_disp, line_color="#d97706", line_width=1.5, line_dash="dash",
+                  annotation_text=f"  Avg: {avg_disp:{fmt}} {cfg['rank_unit']}", annotation_position="top left",
+                  annotation_font=dict(color="#d97706", size=10))
+    _rank_layout(fig, title, len(d), cfg, view_label, margin)
+    return fig
+
+
+def _row_bg_text(rank: int, n: int):
+    if n == 0:
+        return SURFACE, TEXT
+    p = rank / max(n - 1, 1)
+    if rank == 0:
+        return "#fecaca", "#991b1b"
+    if rank == 1:
+        return "#fee2e2", "#b91c1c"
+    if rank == n - 1:
+        return "#bbf7d0", "#166534"
+    if rank == n - 2:
+        return "#dcfce7", "#15803d"
+    if p < 0.35:
+        return "#fef2f2", TEXT
+    if p > 0.65:
+        return "#f0fdf4", TEXT
+    return SURFACE, TEXT
+
+
+def heatmap_table(rows: dict, years: list, title: str, unit: str = "M bu", divisor: float = 1e6,
+                  is_ratio: bool = False, total: dict | None = None, total_label: str = "NY Total",
+                  fmt: str = ".1f", top_row: dict | None = None, top_row_label: str = "",
+                  cell_status: dict | None = None, top_row_cell_status: dict | None = None,
+                  first_col: str = "Row") -> go.Figure:
+    """Per-row heat map (top 2 green, bottom 2 red) with % vs LY, olympic average, % of average, min/max
+    and share of the total. rows: {label: {year: raw_value_or_None}}."""
+    _D, _P, _S, _BR, _T, _M, _A, _G = ("#f5f7fa", "#edf1f7", "#e2e8f2", "#c8d5e3", "#1a2332", "#64748b",
+                                      "#0693e3", "#d97706")
+
+    def disp(v):
+        return None if v is None or (isinstance(v, float) and np.isnan(v)) else v / divisor
+
+    def num(v):
+        return "—" if v is None else f"{v:{fmt}}"
+
+    def pct(v):
+        return "—" if v is None else f"{'▲' if v >= 0 else '▼'} {abs(v):.1f}%"
+
+    def olympic(vals):
+        c = [v for v in vals if v is not None]
+        if len(c) >= 4:
+            c = sorted(c)[1:-1]
+        return sum(c) / len(c) if c else None
+
+    def row_colors(vals):
+        valid = [(i, v) for i, v in enumerate(vals) if v is not None]
+        n = len(valid)
+        rank_of = {idx: r for r, (idx, _) in enumerate(sorted(valid, key=lambda x: x[1]))}
+        bgs, fgs = [], []
+        for i in range(len(vals)):
+            if i not in rank_of:
+                bgs.append(_S)
+                fgs.append(_M)
+            else:
+                bg, fg = _row_bg_text(rank_of[i], n)
+                bgs.append(bg)
+                fgs.append(fg)
+        return bgs, fgs
+
+    labels, data, bg, fg, pinned = [], [], [], [], []
+    if top_row and top_row_label:
+        labels.append(f"▶  {top_row_label}")
+        data.append([disp(top_row.get(y)) for y in years])
+        bg.append(["#dbeafe"] * len(years))
+        fg.append([_G] * len(years))
+        pinned.append(True)
+    for lbl in rows:
+        vals = [disp(rows[lbl].get(y)) for y in years]
+        b, f = row_colors(vals)
+        labels.append(lbl)
+        data.append(vals)
+        bg.append(b)
+        fg.append(f)
+        pinned.append(False)
+    if total:
+        vals = [disp(total.get(y)) for y in years]
+        b, f = row_colors(vals)
+        labels.append(total_label)
+        data.append(vals)
+        bg.append(b)
+        fg.append(f)
+        pinned.append(True)
+    n_rows = len(labels)
+    latest, prev = years[-1], (years[-2] if len(years) >= 2 else None)
+    s_ly, s_avg, s_pavg, s_min, s_max, s_share = [], [], [], [], [], []
+    bg_ly, fg_ly, bg_pavg, fg_pavg, bg_sh, fg_sh = [], [], [], [], [], []
+    for lbl, vals in zip(labels, data):
+        clean = [v for v in vals if v is not None]
+        cur = vals[years.index(latest)]
+        pv = vals[years.index(prev)] if prev is not None else None
+        if cur and pv and pv != 0:
+            p = (cur - pv) / abs(pv) * 100
+            s_ly.append(pct(p))
+            bg_ly.append("#dcfce7" if p >= 0 else "#fee2e2")
+            fg_ly.append("#166534" if p >= 0 else "#991b1b")
+        else:
+            s_ly.append("—")
+            bg_ly.append(_S)
+            fg_ly.append(_M)
+        avg = olympic(clean)
+        s_avg.append(num(avg))
+        if cur and avg and avg != 0:
+            pa = (cur - avg) / abs(avg) * 100
+            s_pavg.append(pct(pa))
+            bg_pavg.append("#dcfce7" if pa >= 0 else "#fee2e2")
+            fg_pavg.append("#166534" if pa >= 0 else "#991b1b")
+        else:
+            s_pavg.append("—")
+            bg_pavg.append(_S)
+            fg_pavg.append(_M)
+        s_min.append(num(min(clean)) if clean else "—")
+        s_max.append(num(max(clean)) if clean else "—")
+        tot = disp(total.get(latest)) if total else None
+        if not is_ratio and tot and tot > 0 and cur:
+            s_share.append(f"{cur / tot * 100:.1f}%")
+            bg_sh.append(_S)
+            fg_sh.append(_G)
+        else:
+            s_share.append("—")
+            bg_sh.append(_S)
+            fg_sh.append(_M)
+
+    status = dict(cell_status or {})
+    if top_row_cell_status and top_row_label:
+        status[f"▶  {top_row_label}"] = top_row_cell_status
+
+    def cell(r, c):
+        s = num(data[r][c])
+        return f"{s} E" if status.get(labels[r], {}).get(years[c], False) else s
+
+    hdr = [first_col] + [str(y) for y in years] + ["% vs LY", f"Olympic Avg\n({unit})", "% of Avg", "Min", "Max",
+                                                    "% of NY"]
+    vals = [labels] + [[cell(r, c) for r in range(n_rows)] for c in range(len(years))] + [s_ly, s_avg, s_pavg, s_min, s_max, s_share]
+    fills = ([[(_BR if pinned[i] else _P) for i in range(n_rows)]]
+             + [[bg[r][c] for r in range(n_rows)] for c in range(len(years))]
+             + [bg_ly, [_S] * n_rows, bg_pavg, [_S] * n_rows, [_S] * n_rows, bg_sh])
+    fonts = ([[(_G if pinned[i] else _T) for i in range(n_rows)]]
+             + [[fg[r][c] for r in range(n_rows)] for c in range(len(years))]
+             + [fg_ly, [_T] * n_rows, fg_pavg, [_T] * n_rows, [_A] * n_rows, fg_sh])
+    fig = go.Figure(go.Table(
+        columnwidth=[130] + [60] * len(years) + [70, 90, 70, 55, 55, 65],
+        header=dict(values=hdr, fill_color=[_P] * len(hdr), font=dict(color=[_M] + [_T] * len(years) + [_M] * 6,
+                                                                       size=11, family="Arial"),
+                    align="center", height=28, line_color=_BR),
+        cells=dict(values=vals, fill_color=fills, font=dict(color=fonts, size=11, family="Arial"),
+                   align=["left"] + ["right"] * (len(years) + 6), height=24, line_color=_BR)))
+    fig.update_layout(paper_bgcolor=_D, margin=dict(l=0, r=0, t=30, b=0), height=max(150, n_rows * 26 + 70),
+                      title=dict(text=title, font=dict(color=_A, size=13)))
+    return fig
