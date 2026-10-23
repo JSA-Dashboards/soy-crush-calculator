@@ -268,7 +268,7 @@ def _dt_fetch_ny(
     statisticcat_desc: str,
     unit_desc: str,
     reference_period_desc: str = "YEAR",
-    year__GE: str = "1990",
+    year__GE: str = "1980",
     util_practice_desc: str = "",
     class_desc: str = "",
 ) -> pd.DataFrame:
