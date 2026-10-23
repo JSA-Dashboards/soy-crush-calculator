@@ -2201,4 +2201,4 @@ Enter crush quantities above to see exposure totals.
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab_territory:
-    draw_territory.render(_sf_connect, _sf_secret, JPSI_DARK, JPSI_BLUE)
+    draw_territory.render(_sf_connect, _sf_secret, JPSI_DARK, JPSI_BLUE, float(front.ZS))

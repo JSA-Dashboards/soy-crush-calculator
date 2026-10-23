@@ -13,6 +13,7 @@ import streamlit as st
 import dt_nass
 import ny_asd_data as nd
 import ny_asd_figs as nf
+import ny_freight as nfr
 import ny_ho
 import ny_livestock as nl
 
@@ -154,8 +155,8 @@ def _card(label: str, value: str, sub: str = "") -> str:
 
 # ── tab ───────────────────────────────────────────────────────────────────────
 @st.fragment
-def render(sf_connect, sf_secret, dark: str, blue: str) -> None:
-    _CTX.update(connect=sf_connect, secret=sf_secret, dark=dark, blue=blue)
+def render(sf_connect, sf_secret, dark: str, blue: str, zs_cents: float | None = None) -> None:
+    _CTX.update(connect=sf_connect, secret=sf_secret, dark=dark, blue=blue, zs=zs_cents)
     st.markdown(f"""
 <div style="background:linear-gradient(135deg,{dark} 0%,#2a4a2a 100%);border-radius:8px;padding:16px 20px;margin-bottom:14px;">
   <div style="font-size:1.2rem;font-weight:700;color:#fff;">🗺️ Draw Territory — New York State</div>
@@ -163,11 +164,13 @@ def render(sf_connect, sf_secret, dark: str, blue: str) -> None:
     USDA NASS production by ASD district and county, with estimates for counties NASS withholds, plus livestock inventory.
   </div>
 </div>""", unsafe_allow_html=True)
-    t_nass, t_ho, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Livestock"])
+    t_nass, t_ho, t_frt, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Freight & Spreads", "Livestock"])
     with t_nass:
         _nass_tab()
     with t_ho:
         _ho_tab()
+    with t_frt:
+        _freight_tab()
     with t_live:
         _livestock_tab()
 
@@ -659,8 +662,260 @@ def _ho_tab() -> None:
                    "bushels are NASS harvested acres and production, with NASS-withheld counties estimated as on the "
                    "NASS Production tab.")
 
+# ── freight lanes and spreads ─────────────────────────────────────────────────
+_NOTES_PRICE = 10.48            # the soybean price behind the notes' $2.62 surtax (25% of $10.48)
+_FR_KEYS = {"rate": "ny_fr_rate", "bu_load": "ny_fr_bu", "min_load": "ny_fr_min", "xb_mult": "ny_fr_xb",
+            "border": "ny_fr_border"}
+
+
+def _fr_apply_preset() -> None:
+    a = nfr.PRESETS[st.session_state["ny_fr_preset"]]
+    st.session_state.update({k: a[f] for f, k in _FR_KEYS.items()})
+
+
+def _cd(v) -> str:
+    """Cents per bushel, shown as dollars from $1 up."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    return f"{v:.0f}¢" if abs(v) < 100 else f"{'-' if v < 0 else ''}${abs(v) / 100:.2f}"
+
+
+def _soy_bushels() -> tuple:
+    """({fips: soybean bu}, {fips: conventional bu}, year): NASS soybeans with the High-Oleic tab's settings."""
+    cobj, _err = _get_crop("Soybeans")
+    ss = st.session_state
+    years = [y for y in nd.YEARS if y != nd.FORECAST_YEAR]
+    year = ss.get("ny_ho_year", years[0])
+    ac, pr = cobj.completed("harvested", year), cobj.completed("production", year)
+    if ac.empty:
+        return {}, {}, year
+    tbl = ny_ho.ho_table(_geo(), dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
+                         ss.get("ny_ho_share", ny_ho.STATE_HO_SHARE * 100) / 100.0, float(ss.get("ny_ho_radius", 35)),
+                         float(ss.get("ny_ho_dairy", 0.3)), float(ss.get("ny_ho_zone", 0.5)))
+    return (dict(zip(tbl["fips"], tbl["Soy bu"].fillna(0.0))), dict(zip(tbl["fips"], tbl["Conv bu"].fillna(0.0))), year)
+
+
+def _freight_tab() -> None:
+    geo = _geo()
+    lanes = nfr.load()
+    names = {d["key"]: d for d in nfr.dests()}
+    zs = _CTX.get("zs")
+    live_price = round(zs / 100.0, 2) if zs else _NOTES_PRICE
+    ss = st.session_state
+    ss.setdefault("ny_fr_preset", list(nfr.PRESETS)[0])
+    if "ny_fr_rate" not in ss:
+        _fr_apply_preset()
+    ss.setdefault("ny_fr_price", live_price)
+
+    st.markdown(
+        "<div class='callout'><strong>Where does each county's soybean go, and what does it cost to get it there?</strong> "
+        "Road miles from each county to the Du Mond plants, Bunge Hamilton (Canada), DeLong's Oswego export terminal and "
+        "Perdue's Pennsylvania plants, turned into a delivered cost (truck + border + Canada's surtax) and, once you enter "
+        "what each buyer bids, a net-back to the farm gate and the territory each buyer can draw.</div>",
+        unsafe_allow_html=True)
+
+    a1, a2, a3 = st.columns([1.7, 1, 1.3])
+    a1.radio("Freight assumptions", list(nfr.PRESETS), horizontal=True, key="ny_fr_preset", on_change=_fr_apply_preset,
+             help="Benchmark trucking uses current truck rates (roughly $4-5 per loaded mile). 'Your notes' uses the "
+                  "0.02 cents per bushel-mile behind the 3 cents for 152 miles in the research notes, with no border costs.")
+    tariff = a2.selectbox("Canada surtax on US soybeans", nfr.TARIFF_CHOICES, index=2, key="ny_fr_tariff",
+                          format_func=lambda v: f"{v:.0%}", help="Notes: 15, 25 or 50% on listed US goods as of 2026-09-08; "
+                                                                "soybeans are on the list at 25% in most categories.")
+    a3.number_input("Soybean price for the surtax ($/bu)", min_value=0.0, max_value=40.0, step=0.05, format="%.2f",
+                    key="ny_fr_price", help="Customs value = this futures price plus Hamilton's bid. Defaults to the "
+                                            f"live front-month ZS (${live_price:.2f}); the notes' $2.62 surtax is 25% of $10.48.")
+    with st.expander("Freight and border assumptions", expanded=False):
+        f1, f2, f3, f4, f5 = st.columns(5)
+        f1.number_input("Truck rate ($/loaded mile)", 0.0, 20.0, step=0.05, format="%.2f", key="ny_fr_rate")
+        f2.number_input("Bushels per load", 300.0, 1200.0, step=10.0, format="%.0f", key="ny_fr_bu",
+                        help="About 50,000 lb net payload / 60 lb per bushel = 833.")
+        f3.number_input("Minimum charge ($/load)", 0.0, 1000.0, step=10.0, format="%.0f", key="ny_fr_min",
+                        help="Short hauls are priced at a minimum, not by the mile.")
+        f4.number_input("Cross-border rate multiplier", 1.0, 3.0, step=0.05, format="%.2f", key="ny_fr_xb",
+                        help="Loads to Canada price in an empty backhaul and border delay. My assumption, not from the notes.")
+        f5.number_input("Border cost ($/load)", 0.0, 2000.0, step=25.0, format="%.0f", key="ny_fr_border",
+                        help="Broker, ACI eManifest filing and unpaid waiting time at the bridge. My assumption.")
+    with st.expander("What each buyer bids (cents per bushel vs futures)", expanded=False):
+        st.caption("Leave at 0 for a pure freight comparison. Enter each buyer's delivered bid basis to see net-backs and "
+                   "the territory each can draw. Hamilton's bid also feeds the surtax customs value.")
+        bc = st.columns(3)
+        for i, d in enumerate(nfr.dests()):
+            bc[i % 3].number_input(d["name"], -400.0, 400.0, 0.0, 5.0, format="%.0f", key=f"ny_fr_bid_{d['key']}")
+
+    a = {f: float(ss[k]) for f, k in _FR_KEYS.items()}
+    bids = {d["key"]: float(ss.get(f"ny_fr_bid_{d['key']}", 0.0)) for d in nfr.dests()}
+    price = float(ss["ny_fr_price"])
+    df = nfr.lane_table(a, float(tariff), price, bids)
+    soy_bu, conv_bu, soy_year = _soy_bushels()
+
+    # ── lane card for one origin ──────────────────────────────────────────────
+    st.markdown('<div class="sh">Lane card</div>', unsafe_allow_html=True)
+    o1, _ = st.columns([1, 3])
+    county = o1.selectbox("Origin county", sorted(v["name"] for v in lanes["origins"].values()),
+                          index=sorted(v["name"] for v in lanes["origins"].values()).index("Seneca"), key="ny_fr_origin")
+    lane = df[df["County"] == county].set_index("key")
+    us, ham = lane.loc["union_springs"], lane.loc["hamilton"]
+    best = lane["netback_c"].idxmax()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("To Du Mond Union Springs", _cd(us["cost_c"]), f"{us['miles']:.0f} road miles", delta_color="off", delta_arrow="off")
+    k2.metric("To Bunge Hamilton", _cd(ham["cost_c"]), f"{ham['miles']:.0f} road miles", delta_color="off", delta_arrow="off",
+              help="Haul + border + Canada surtax.")
+    k3.metric("In-state advantage", _cd(ham["cost_c"] - us["cost_c"]), "Hamilton vs Union Springs",
+              delta_color="off", delta_arrow="off", help="Hamilton's cost minus Union Springs' cost, per bushel.")
+    k4.metric("Best net-back", lane.loc[best, "short"], f"{lane.loc[best, 'netback_c']:+.0f}¢ vs futures", delta_color="off",
+              delta_arrow="off", help="The buyer with the highest bid minus delivered cost. At zero bids that is the cheapest haul.")
+    t = lane.reset_index()
+    show = pd.DataFrame({"Buyer": t["Buyer"], "Road miles": t["miles"].round(0), "Drive (hrs)": t["hours"].round(1),
+                         "Haul (¢/bu)": t["haul_c"].round(1), "Border (¢/bu)": t["border_c"].round(1),
+                         "Surtax (¢/bu)": t["surtax_c"].round(1), "Cost (¢/bu)": t["cost_c"].round(1),
+                         "Bid (¢)": t["bid_c"].round(0), "Net-back (¢)": t["netback_c"].round(1),
+                         "vs Union Springs (¢)": t["vs_us_c"].round(1)})
+    lc1, lc2 = st.columns([1.85, 1])
+    lc1.dataframe(show, use_container_width=True, hide_index=True)
+    bar = go.Figure()
+    for col, nm, color in (("haul_c", "Haul", "#5e7164"), ("border_c", "Border + backhaul", "#f59e0b"),
+                           ("surtax_c", "Surtax", "#dc2626")):
+        bar.add_trace(go.Bar(y=t["short"], x=t[col], name=nm, orientation="h", marker_color=color,
+                             hovertemplate=f"{nm}: %{{x:.1f}}¢<extra></extra>"))
+    bar.update_layout(barmode="stack", height=max(300, 44 * len(t) + 90), paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE,
+                      font=dict(color=nf.TEXT, family="Arial"), margin=dict(l=10, r=10, t=40, b=64),
+                      title=dict(text=f"{county} County: cost to each buyer (¢/bu)", font=dict(size=13, color=nf.ACCENT)),
+                      legend=dict(orientation="h", y=-0.14, x=0.5, xanchor="center", yanchor="top", font=dict(size=10)),
+                      yaxis=dict(autorange="reversed", tickfont=dict(size=10)), xaxis=dict(gridcolor=nf.BORDER))
+    lc2.plotly_chart(bar, use_container_width=True, key="ny_fr_bar", config={"displayModeBar": False})
+    st.caption("Origin = the county's centre point; real lanes run from a farm or elevator, so towns near a plant are closer "
+               "than the county figure. Road miles from OpenStreetMap routing (OSRM), built "
+               f"{lanes['built']}. Cost = haul + border + surtax; net-back = bid minus cost.")
+
+    # ── map ───────────────────────────────────────────────────────────────────
+    st.markdown("<hr style='border-color:#d7e2dc;margin:10px 0'>", unsafe_allow_html=True)
+    m1, m2, m3 = st.columns([1.9, 1.5, 1.6])
+    mode = m1.radio("Map", ["Draw territory (best net-back)", "Delivered cost to a buyer", "In-state advantage over Hamilton"],
+                    key="ny_fr_map", horizontal=False)
+    buyer = None
+    if mode.startswith("Delivered"):
+        buyer = m2.selectbox("Buyer", [d["key"] for d in nfr.dests()], key="ny_fr_map_buyer",
+                             format_func=lambda k: names[k]["name"])
+    show_comp = m3.checkbox("Show crushers and export terminals", value=True, key="ny_fr_comp")
+    comp_cats = ["crush"] if show_comp else None
+    cost_note = f"{tariff:.0%} surtax on a ${price:.2f} bean" if tariff else "no surtax"
+    if mode.startswith("Draw"):
+        win = nfr.winners(df).copy()
+        win["hover"] = [
+            f"<b>{r.County}</b><br>Best net-back: {r.Buyer}<br>{r.miles:.0f} road miles · cost {_cd(r.cost_c)} · "
+            f"net-back {r.netback_c:+.0f}¢<br>Conventional soybeans: {conv_bu.get(r.fips, 0) / 1e3:,.0f}K bu"
+            for r in win.itertuples()]
+        flat = all(v == 0 for v in bids.values())
+        fig = nf.territory_fig(geo, win, nfr.DEST_COLORS, "Draw territory: the buyer each county nets most from",
+                               ("Pure freight comparison (every buyer's bid at 0)" if flat else "Net-back = bid minus delivered cost")
+                               + f" · {cost_note} · labels = cost to the winner", comp_cats)
+    elif mode.startswith("Delivered"):
+        sub = df[df["key"] == buyer].copy()
+        sub["Value"] = sub["cost_c"]
+        sub["hover"] = [f"<b>{r.County}</b><br>{r.miles:.0f} road miles ({r.hours:.1f} hrs)<br>Haul {r.haul_c:.0f}¢ · "
+                        f"border {r.border_c:.0f}¢ · surtax {r.surtax_c:.0f}¢<br><b>Cost {_cd(r.cost_c)}/bu</b>"
+                        for r in sub.itertuples()]
+        fig = nf.lane_value_fig(geo, sub, f"Delivered cost to {names[buyer]['name']}", cost_note, "Cost<br>(¢/bu)",
+                                comp_cats=comp_cats)
+    else:
+        us_c = df[df["key"] == "union_springs"].set_index("fips")["cost_c"]
+        hm = df[df["key"] == "hamilton"].copy()
+        hm["Value"] = hm["cost_c"] - hm["fips"].map(us_c)
+        hm["hover"] = [f"<b>{r.County}</b><br>Hamilton {_cd(r.cost_c)} vs Union Springs {_cd(us_c[r.fips])}<br>"
+                       f"<b>In-state advantage {_cd(r.Value)}/bu</b>" for r in hm.itertuples()]
+        fig = nf.lane_value_fig(geo, hm, "In-state advantage: Bunge Hamilton cost minus Du Mond Union Springs cost",
+                                cost_note, "Advantage<br>(¢/bu)", cscale=nf.SAGE_SEQ, comp_cats=comp_cats)
+    st.plotly_chart(fig, use_container_width=True, key="ny_fr_map_chart",
+                    config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+    st.caption("Hover a county for the breakdown. Stars are the Du Mond plants. Hamilton, Ontario and Perdue's Pennsylvania "
+               "plants are off the map frame; their lanes still count.")
+
+    # ── territory bushels ─────────────────────────────────────────────────────
+    st.markdown('<div class="sh">Soybean bushels by buyer territory</div>', unsafe_allow_html=True)
+    conv = st.checkbox("Count conventional bushels only (after the High-Oleic tab's carve-out)", value=True, key="ny_fr_conv")
+    bu = conv_bu if conv else soy_bu
+    w = nfr.winners(df)
+    w["bu"] = w["fips"].map(bu).fillna(0.0)
+    tot_bu = w["bu"].sum()
+    grp = (w.groupby(["key", "Buyer"]).agg(Counties=("fips", "count"), bu=("bu", "sum"), miles=("miles", "mean"),
+                                           cost=("cost_c", "mean")).reset_index().sort_values("bu", ascending=False))
+    tbl = pd.DataFrame({"Buyer": grp["Buyer"], "Counties won": grp["Counties"], f"{soy_year} bushels (K)": (grp["bu"] / 1e3).round(0),
+                        "% of NY": (grp["bu"] / tot_bu * 100).round(1) if tot_bu else 0.0,
+                        "Avg road miles": grp["miles"].round(0), "Avg cost (¢/bu)": grp["cost"].round(1)})
+    b1, b2 = st.columns([2.2, 1])
+    b1.dataframe(tbl, use_container_width=True, hide_index=True)
+    dm = w[w["key"].isin(["union_springs", "york"])]["bu"].sum()
+    b2.metric("Du Mond's territory", f"{dm / 1e6:,.2f}M bu", f"{dm / tot_bu:.0%} of NY" if tot_bu else None,
+              delta_color="off", delta_arrow="off", help="Bushels in the counties where Union Springs or York has the best net-back.")
+    st.caption(f"{soy_year} NASS soybean production by county ("
+               + ("conventional share only, from the High-Oleic tab's model and settings" if conv else "all soybeans")
+               + "). With every bid at 0, a buyer 'wins' a county only on freight.")
+
+    # ── surtax sensitivity ────────────────────────────────────────────────────
+    st.markdown('<div class="sh">Surtax sensitivity (selected origin)</div>', unsafe_allow_html=True)
+    base_cost = ham["haul_c"] + ham["border_c"]
+    prices = [price * 0.8, price, price * 1.2]
+    grid = pd.DataFrame(
+        {f"${p:.2f}/bu" + (" (now)" if i == 1 else ""): [
+            round(base_cost + nfr.surtax_cents(p + bids["hamilton"] / 100.0, t_) - us["cost_c"], 0) for t_ in nfr.TARIFF_CHOICES]
+         for i, p in enumerate(prices)},
+        index=[f"{t_:.0%} surtax" for t_ in nfr.TARIFF_CHOICES])
+    g1, g2 = st.columns([1.9, 1.5])
+    g1.dataframe(grid.style.format("{:,.0f}¢"), use_container_width=True)
+    g2.caption(f"In-state advantage in ¢/bu for {county} County beans (Hamilton cost minus Union Springs cost) at each surtax "
+               "tier and soybean price. The surtax is a percentage of the price, so every move in beans moves the advantage; "
+               "at 0% what is left is the freight difference alone.")
+
+    # ── notes check ───────────────────────────────────────────────────────────
+    with st.expander("Check against your notes (sections eight and nine)", expanded=False):
+        def mi(c, k):
+            return next(v["miles"][k] for v in lanes["origins"].values() if v["name"] == c)
+        sen = df[df["County"] == "Seneca"].set_index("key")
+        bench = nfr.lane_table(nfr.BENCHMARK, float(tariff), price, bids)
+        bsen = bench[bench["County"] == "Seneca"].set_index("key")
+        nsen = nfr.lane_table(nfr.NOTES, float(tariff), _NOTES_PRICE, {})
+        nsen = nsen[nsen["County"] == "Seneca"].set_index("key")
+        rows = [
+            ("Seneca to Hamilton, miles", "~152", f"{mi('Seneca', 'hamilton'):.0f}", "County centre point, by road"),
+            ("Seneca to Union Springs, miles", "~11", f"{mi('Seneca', 'union_springs'):.0f}",
+             "Cayuga Lake forces a detour from Seneca's centre; Seneca towns on the lake are nearer"),
+            ("Union Springs to Hamilton, miles", "~162", f"{mi('Cayuga', 'hamilton'):.0f}", "Cayuga County centre point"),
+            ("Freight to Hamilton", "~3¢", f"{_cd(sen.loc['hamilton', 'haul_c'] + sen.loc['hamilton', 'border_c'])}",
+             f"Notes preset gives {_cd(nsen.loc['hamilton', 'haul_c'])}; benchmark trucking with border costs gives "
+             f"{_cd(bsen.loc['hamilton', 'haul_c'] + bsen.loc['hamilton', 'border_c'])}"),
+            ("Surtax at 25%", "$2.62", f"${price * 0.25:.2f}", f"Notes imply a ${_NOTES_PRICE:.2f} bean; yours is ${price:.2f}"),
+            ("All-in cost to Hamilton", "$2.66", _cd(sen.loc["hamilton", "cost_c"]), "Haul + border + surtax"),
+            ("In-state advantage", "$2.63", _cd(sen.loc["hamilton", "cost_c"] - sen.loc["union_springs", "cost_c"]),
+             "Hamilton cost minus Union Springs cost"),
+        ]
+        st.dataframe(pd.DataFrame(rows, columns=["Item", "Your notes", "This model (now)", "Comment"]),
+                     use_container_width=True, hide_index=True)
+        hb = nfr.haul_cents(152, nfr.BENCHMARK, True) + nfr.border_cents(nfr.BENCHMARK)
+        hd = nfr.haul_cents(152, nfr.BENCHMARK, False)
+        st.markdown(
+            f"- **Freight is the one number I'd challenge.** 3¢ for 152 miles is 0.02¢ per bushel-mile. The notes say "
+            f"'twenty cents per bushel-mile', which would be $30 a bushel, so that is probably a mis-transcription. At "
+            f"roughly $4-5 per loaded mile (USDA AMS truck-rate benchmarks) a 152-mile haul costs about {_cd(hd)} per bushel "
+            f"in New York and about {_cd(hb)} to Hamilton with the border and empty backhaul, 20-40 times the notes' figure.\n"
+            f"- **The conclusion survives.** The surtax is a percentage of the price, so it still dominates "
+            f"(${price * 0.25:.2f} at today's beans), and in-state still wins by well over $2. The freight correction matters "
+            f"for the lanes with no surtax: Union Springs vs York vs Oswego vs Perdue, and which counties each can reach.\n"
+            f"- **Mileage:** I measure from each county's centre point, so a county's lanes can differ from a town-to-plant "
+            f"figure by 15 miles or more.\n- **Surtax base:** modeled on the futures price plus Hamilton's bid, the customs "
+            f"value for goods sold into Canada.")
+
+    with st.expander("County detail (all counties, all buyers)", expanded=False):
+        wide_c = df.pivot(index="County", columns="short", values="cost_c").round(0)
+        wide_m = df.pivot(index="County", columns="short", values="miles").round(0)
+        wide = wide_c.add_suffix(" ¢").join(wide_m.add_suffix(" mi"))
+        wn = nfr.winners(df).set_index("County")
+        wide.insert(0, "Best buyer", wn["short"])
+        st.dataframe(wide.reset_index(), use_container_width=True, hide_index=True)
+        st.caption("Cost in cents per bushel (haul + border + surtax) and road miles from the county centre point.")
+
+
 # ── livestock: Census county / ASD view, then the annual state survey ─────────
-_LS_UNITS = {"Inventory (head)": ("K head", 1e3, ".1f"), "Farms with Inventory": ("farms", 1, ",.0f"),
+_LS_UNITS ={"Inventory (head)": ("K head", 1e3, ".1f"), "Farms with Inventory": ("farms", 1, ",.0f"),
              "Head per Farm": ("head/farm", 1, ".0f")}
 
 

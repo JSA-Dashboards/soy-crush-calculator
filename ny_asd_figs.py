@@ -508,6 +508,71 @@ def ho_fig(tbl: pd.DataFrame, geo: dict, view: str, year: int, state_share: floa
     return fig
 
 
+# ── freight lane maps ─────────────────────────────────────────────────────────
+def _lane_finish(fig, geo: dict, title: str, sub: str, comp_cats) -> go.Figure:
+    if comp_cats:
+        add_competition(fig, geo, comp_cats)
+    add_facilities(fig, "bottom")
+    frame_map(fig, geo)
+    fig.update_layout(**_base_layout(f"{title}<br><sup>{sub}</sup>", 18, 64), height=map_height(geo) + 120,
+                      dragmode=False)
+    fig.update_layout(margin=dict(l=0, r=0, t=64, b=120))
+    return fig
+
+
+def territory_fig(geo: dict, win: pd.DataFrame, colors: dict, title: str, sub: str, comp_cats=None) -> go.Figure:
+    """Counties coloured by the buyer with the best net-back. win: [fips, key, Buyer, cost_c, hover]."""
+    counties = geo["counties"]
+    all_fips = [f["id"] for f in counties["features"]]
+    line = dict(color="#8fa6bb", width=1.1)
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
+                                colorscale=[[0, PANEL], [1, PANEL]], showscale=False, marker=dict(line=line),
+                                hoverinfo="skip"))
+    for key in win["key"].unique():
+        g = win[win["key"] == key]
+        col = colors.get(key, MUTED)
+        fig.add_trace(go.Choropleth(
+            geojson=counties, featureidkey="id", locations=g["fips"], z=[0] * len(g), colorscale=[[0, col], [1, col]],
+            showscale=False, marker=dict(line=line, opacity=0.78), text=g["hover"],
+            hovertemplate="%{text}<extra></extra>"))
+        fig.add_trace(go.Scattergeo(lon=[None], lat=[None], mode="markers", name=f"{g['Buyer'].iloc[0]} ({len(g)})",
+                                    marker=dict(symbol="square", size=14, color=col), showlegend=True))
+    keep = win[win["cost_c"].notna()]
+    place_labels(fig, list(keep["fips"]), list(keep["cost_c"]), geo["centroids"],
+                 lambda v: f"{v:.0f}¢" if v < 1000 else f"${v / 100:.1f}")
+    return _lane_finish(fig, geo, title, sub, comp_cats)
+
+
+def lane_value_fig(geo: dict, df: pd.DataFrame, title: str, sub: str, clabel: str, cscale=None,
+                   diverging: bool = False, comp_cats=None) -> go.Figure:
+    """Counties coloured by one number in cents per bushel. df: [fips, Value, hover]."""
+    counties = geo["counties"]
+    all_fips = [f["id"] for f in counties["features"]]
+    line = dict(color="#8fa6bb", width=1.1)
+    val = dict(zip(df["fips"], df["Value"]))
+    hov = dict(zip(df["fips"], df["hover"]))
+    z = [val.get(f) for f in all_fips]
+    nums = [v for v in z if v is not None and not pd.isna(v)]
+    zmax = max([abs(v) for v in nums] or [1.0])
+    zmin, zhi = (-zmax, zmax) if diverging else (min(nums + [0.0]), zmax)
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
+                                colorscale=[[0, PANEL], [1, PANEL]], showscale=False, marker=dict(line=line),
+                                hoverinfo="skip"))
+    fig.add_trace(go.Choropleth(
+        geojson=counties, featureidkey="id", locations=all_fips, z=z, zmin=zmin, zmax=zhi,
+        colorscale=cscale or _OR_RD, marker=dict(line=line), text=[hov.get(f, "") for f in all_fips],
+        hovertemplate="%{text}<extra></extra>",
+        colorbar=dict(title=dict(text=clabel, font=dict(color=TEXT, size=13)), tickfont=dict(color=TEXT, size=12),
+                      thickness=22, len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom",
+                      bgcolor="rgba(255,255,255,0.85)")))
+    keep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f))]
+    place_labels(fig, keep, [val[f] for f in keep], geo["centroids"],
+                 lambda v: f"{v:+.0f}¢" if diverging else (f"{v:.0f}¢" if abs(v) < 1000 else f"${v / 100:.1f}"))
+    return _lane_finish(fig, geo, title, sub, comp_cats)
+
+
 # ── charts ────────────────────────────────────────────────────────────────────
 def history_bar(series: dict, years: list, title: str, y_label: str = "", fmt: str = ".2f") -> go.Figure:
     colors = ["#0693e3", "#f59e0b", "#ef4444", "#a78bfa", "#16a34a", "#fb923c", "#e879f9"]
