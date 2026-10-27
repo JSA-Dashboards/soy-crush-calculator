@@ -17,7 +17,8 @@ import ontario_vh as ovh
 
 _SOY_TIP = ("Ontario's own processing ('milling' in OMAFRA's table) has run about 3 Mt a year since 2019/20 and exports "
             "another 1.1-1.3 Mt, so a short crop is felt in exports first and then in imports.")
-_CONF_TXT = {"medium": "medium confidence", "low": "low confidence: dated or partial source"}
+_CONF_TXT = {"high": "high confidence: EIA and trade sources", "medium": "medium confidence",
+             "low": "low confidence: dated or partial source"}
 
 
 def _mbu(crop: str, kt: float) -> str:
@@ -503,10 +504,12 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             if not items:
                 continue
             st.markdown(f"<span style='color:{meta['color']};font-weight:700;'>● {meta['label']}</span>", unsafe_allow_html=True)
-            st.markdown("\n".join(f"- **{n['name']}** — {n['town']} *({_CONF_TXT[n['conf']]})*  \n  {n['cap']}"
-                                  + (f" {n['note']}" if n["note"] else "") for n in items))
+            st.markdown("\n".join(f"- **{n['name']}** — {n['town']}" + (" — **idle**" if n.get("status") == "idle" else "")
+                                  + f" *({_CONF_TXT[n['conf']]})*  \n  {n['cap']}" + (f" {n['note']}" if n["note"] else "")
+                                  for n in items))
         st.caption("Capacity figures come from dated trade reports and company releases; confirm with the plants or the "
-                   "Canadian Oilseed Processors Association before relying on them. Markers sit at the town, not the plant gate.")
+                   "Canadian Oilseed Processors Association before relying on them. Most Ontario markers sit at the town, "
+                   "not the plant gate; the two New York ethanol plants are placed at their sites.")
 
     with st.expander("Data notes", expanded=False):
         st.markdown(

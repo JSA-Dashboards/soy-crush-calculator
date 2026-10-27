@@ -60,6 +60,18 @@ NODES = [
     dict(name="Greenfield Global - Johnstown", kind="ethanol", town="Johnstown (Leeds and Grenville)", lat=44.7253,
          lon=-75.4936, conf="low", cap="~20 million bu of corn (2008 report); ~250 million litres (2020 release), part "
                                        "since moved to high-purity alcohol.", note="Eastern Ontario corn demand."),
+    # New York's two corn-ethanol plants. status="idle" draws a hollow marker.
+    dict(name="Western New York Energy - Medina", kind="ethanol", town="Medina (Orleans Co., NY)", lat=43.2112, lon=-78.3661,
+         conf="high", cap="~62 million gal/yr of fuel ethanol (EIA, Jan 1 2025), roughly 22 million bu of corn a year at 2.8 gal/bu "
+                          "(our arithmetic); runs about 30% over its 50 million gal design. The RFA (Oct 2025) calls it New York's "
+                          "only large-scale plant. Also makes high-purity alcohol after a $38 million expansion.",
+         note="The in-state outlet for New York corn."),
+    dict(name="Fulton ethanol plant (ex-Sunoco, Attis)", kind="ethanol", town="Volney, south of Fulton (Oswego Co., NY)",
+         lat=43.2990, lon=-76.3801, conf="medium", status="idle",
+         cap="85-100 million gal/yr nameplate (sources differ). Built by Northeast Biofuels in 2008, bought by Sunoco in 2009 and "
+             "restarted in 2010, sold to Attis in 2019. Idle since Attis failed to run it; Oswego County took the site and sold it "
+             "at auction in July 2025 (one local report: $4.9 million).",
+         note="No restart found in the coverage checked."),
 ]
 
 
