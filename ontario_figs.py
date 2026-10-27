@@ -208,3 +208,28 @@ def vh_scatter(m: dict, crop: str, year: int) -> go.Figure:
 def np_polyfit(x, y):
     import numpy as np
     return np.polyfit(np.asarray(x, dtype=float), np.asarray(y, dtype=float), 1)
+
+
+# ── US soybean shipments to Canada ────────────────────────────────────────────
+def trade_chart(latest: int) -> go.Figure:
+    """Monthly Ontario-gateway shipments for the last three crop years over the average of the five before them."""
+    import ontario_trade as ot
+    pv, avg, hist = ot.monthly_pivot(latest)
+    months = ["Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=months, y=[avg.get(i) for i in range(12)], mode="lines", name=f"Median {hist[0]}/{str(hist[0] + 1)[2:]}"
+                             f" to {hist[-1]}/{str(hist[-1] + 1)[2:]}", line=dict(color="#32373c", width=2, dash="dash"),
+                             hovertemplate="Median: %{y:.1f} kt<extra></extra>"))
+    styles = {latest - 2: ("#9ca3af", None), latest - 1: ("#f59e0b", None), latest: ("#0693e3", None)}
+    for cy in pv.columns:
+        color, _ = styles[cy]
+        fig.add_trace(go.Bar(x=months, y=[pv[cy].get(i) for i in range(12)], name=f"{cy}/{str(cy + 1)[2:]}", marker_color=color,
+                             marker_line_width=0, hovertemplate=f"{cy}/{str(cy + 1)[2:]}: " + "%{y:.1f} kt<extra></extra>"))
+    fig.update_layout(barmode="group", height=380, paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE, font=dict(color=nf.TEXT, family="Arial"),
+                      margin=dict(l=60, r=20, t=50, b=80),
+                      title=dict(text="US soybeans shipped to Canada through the Ontario gateways, by month (kt)",
+                                 font=dict(size=14, color=nf.ACCENT)),
+                      legend=dict(orientation="h", y=-0.14, x=0.5, xanchor="center", yanchor="top", font=dict(size=11)),
+                      xaxis=dict(gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)),
+                      yaxis=dict(gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED), rangemode="tozero"))
+    return fig

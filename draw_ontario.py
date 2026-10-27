@@ -11,6 +11,7 @@ import streamlit as st
 
 import ontario as on
 import ontario_figs as of
+import ontario_trade as ot
 import ontario_vh as ovh
 
 _SOY_TIP = ("Ontario's own processing ('milling' in OMAFRA's table) has run about 3 Mt a year since 2019/20 and exports "
@@ -229,6 +230,42 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
     elif not season.empty:
         st.info("The crop window has not finished yet, so there is no yield cross-check.")
 
+    # ── what US shipments say ─────────────────────────────────────────────────
+    if crop == "soy":
+        st.markdown('<div class="sh">What US shipments say</div>', unsafe_allow_html=True)
+        cyt = ot.crop_years()
+        tcy = int(cyt.index.max())
+        row, prior = cyt.loc[tcy], cyt.loc[tcy - 1]
+        typ = ot.typical(tcy)
+        lm = ot.latest_month()
+        cy_lab = f"{tcy}/{str(tcy + 1)[2:]}" + ("" if row["complete"] else " to date")
+        all_m = ot.monthly()
+        late_now = all_m[(all_m["cy"] == tcy) & (all_m["pos"] >= 7)]["ontario"].sum()
+        late_prev = all_m[(all_m["cy"] == tcy - 1) & (all_m["pos"] >= 7)]["ontario"].sum()
+        ja_all, ja_ont = ot.span_total(f"{tcy + 1}-01", f"{tcy + 1}-08")
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric(f"US soybeans to Canada, {cy_lab}", f"{row['total']:,.0f} kt", f"{ot.to_mbu(row['total']):.1f}M bu · "
+                  f"{row['total'] / prior['total'] - 1:+.0%} on a year earlier", delta_color="off", delta_arrow="off")
+        t2.metric("Through the Ontario gateways", f"{row['ontario']:,.0f} kt", f"{row['share']:.0%} of the total", delta_color="off",
+                  delta_arrow="off", help="Customs districts Detroit, Buffalo and Cleveland.")
+        t3.metric("Typical (3 prior years)", f"{typ:,.0f} kt", f"{ot.to_mbu(typ):.1f}M bu", delta_color="off", delta_arrow="off")
+        t4.metric(f"Latest month ({ot.month_label(lm)})", f"{all_m.iloc[-1]['ontario']:.1f} kt", delta_color="off")
+        st.plotly_chart(of.trade_chart(tcy), use_container_width=True, key="on_trade_chart", config={"displayModeBar": False})
+        st.markdown(
+            f"US soybeans reaching Canada through the Ontario gateways were **{row['ontario']:,.0f} kt** in {cy_lab}, "
+            f"{row['ontario'] / typ - 1:+.0%} on the three-year typical of {typ:,.0f} kt: no surge in imports. The year was "
+            f"back-loaded, though: April to August ran {late_now:,.0f} kt against {late_prev:,.0f} kt a year earlier, as farm stocks "
+            f"ran down. Trade analysts had projected about 500 kt of Ontario imports for January to August; shipments were "
+            f"{ja_ont:,.0f} kt, {ja_ont / 500:.0%} of that. That fits the balance below: at the processing run-rate Ontario's own "
+            "crop covers its crushers, and imports rise only if processing runs harder. OMAFRA's table has no import line, so typical "
+            "imports are probably already inside its processing history and only a change from typical would move the balance. "
+            "Census publishes September "
+            "around November 5, the first month after the surtax your notes date to September 8.")
+        st.caption(f"Census Bureau exports to Canada, HS 1201900005 + 1201900095, by customs district of exit, through {ot.month_label(lm)}. "
+                   "Detroit, Buffalo and Cleveland are treated as the Ontario gateways (88% to 99% of the total; Ogdensburg and Pembina "
+                   "excluded). Shipments are dated at US exit, not arrival, and the crop year runs September to August, one month off "
+                   "the OMAFRA tables.")
+
     # ── what Ontario needs ────────────────────────────────────────────────────
     st.markdown('<div class="sh">What Ontario needs</div>', unsafe_allow_html=True)
     st.caption("Processors, feed and seed come first, then a carryout; whatever is left can be exported, and a negative "
@@ -355,8 +392,13 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             if need_kt > 0:
                 msg += (f"The modeled import need of {_kt(need_kt)} would be {on.to_mbu(crop, need_kt) * 1e6 / ny_soy_bu:.0%} of New "
                         "York's crop. ")
-            msg += ("New York can only ever be a marginal supplier to Ontario's crushers: the swing is in the Midwest, and "
-                    "the surtax is what separates a US bean from an Ontario one.")
+            typ_imp = ot.typical(ot.crop_years().index.max())
+            imp_bu = ot.to_mbu(typ_imp) * 1e6
+            msg += (f"Ontario's normal imports of US beans (about {typ_imp:,.0f} kt, {ot.to_mbu(typ_imp):.1f}M bu) equal "
+                    f"{imp_bu / ny_soy_bu:.0%} of New York's whole crop"
+                    + (f" and {imp_bu / ny_conv_bu:.1f}x its conventional pool" if ny_conv_bu else "")
+                    + ", and Buffalo is one of the two main gateways, so New York beans are relevant to that flow. The Midwest "
+                    "still supplies most of it, and the surtax is what separates a US bean from an Ontario one.")
             st.markdown(msg)
 
     # ── map ───────────────────────────────────────────────────────────────────
@@ -410,6 +452,8 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             "update); farm stocks come from table 32-10-0007-01 (Dec 31, Mar 31 and Jul 31, farm stocks only, no commercial). "
             "The Great Ontario Yield Tour and the Farmtario trade estimate are typed in from published articles and will not "
             "update themselves.\n"
+            "- **Import signal:** US Census export data (soybeans to Canada, by customs district); Statistics Canada's provincial "
+            "trade tables do not go to soybeans. It measures US shipments, not Ontario's arrivals, and misses any non-US beans.\n"
             "- **Satellite series:** NOAA STAR Vegetation Health (province average over cropland pixels, weekly, 1982 to now; "
             "fetched live, bundled copy as fallback). StatCan's public NDVI tables stopped (32-10-0453-01 archived at 2021-10-04; "
             "32-10-0383-01 ends 2024-05-27), although StatCan's own September model still uses its CCAP series internally.\n"
