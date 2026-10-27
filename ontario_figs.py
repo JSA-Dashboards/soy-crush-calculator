@@ -7,18 +7,26 @@ import plotly.graph_objects as go
 import ny_asd_figs as nf
 import ontario as on
 
-VIEW = {"lon": [-83.9, -73.9], "lat": [41.6, 46.5]}      # southern Ontario, with the New York side for context
+VIEW = {"lon": [-83.9, -73.9], "lat": [41.6, 46.5]}      # southern Ontario on its own
 LINE = dict(color="#8fa6bb", width=1.1)
 
 
-def _ratio() -> float:
+def _frame(ny_geo: dict | None = None) -> dict:
+    """Map frame: southern Ontario alone, or widened south and east to take in New York when the two share a map."""
+    if not ny_geo:
+        return VIEW
+    v = nf.geo_view(ny_geo)
+    return {"lon": [VIEW["lon"][0], max(VIEW["lon"][1], v["lon"][1])], "lat": [min(VIEW["lat"][0], v["lat"][0]), VIEW["lat"][1]]}
+
+
+def _ratio(frame: dict) -> float:
     def merc(lat):
         return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
-    return (merc(VIEW["lat"][1]) - merc(VIEW["lat"][0])) / math.radians(VIEW["lon"][1] - VIEW["lon"][0])
+    return (merc(frame["lat"][1]) - merc(frame["lat"][0])) / math.radians(frame["lon"][1] - frame["lon"][0])
 
 
-def map_height(width: int = 960) -> int:
-    return int(width * _ratio()) + 64 + 120
+def map_height(width: int = 960, frame: dict | None = None) -> int:
+    return int(width * _ratio(frame or VIEW)) + 64 + 120
 
 
 def sd_chart(crop: str) -> go.Figure:
@@ -53,35 +61,16 @@ def sd_chart(crop: str) -> go.Figure:
     return fig
 
 
-def _kt(v):
-    if pd.isna(v) or v <= 0:
-        return ""
-    return f"{v / 1000:.1f}M" if v >= 1000 else (f"{v:.0f}K" if v >= 10 else (f"{v:.1f}K" if v >= 1 else "<1K"))
-
-
-_LABEL = {"kt": _kt, "ac": nf.fmt_acres, "yd": nf.fmt_yield}
-
-
-def shrink_labels(fig: go.Figure, k: float) -> go.Figure:
-    """Scale every text-label trace down by k (for maps shown side by side)."""
-    for t in fig.data:
-        if getattr(t, "mode", None) == "text" and t.textfont is not None and t.textfont.size:
-            t.textfont.size = max(7, int(t.textfont.size * k))
-    return fig
-
-
-def ontario_map(vdf: pd.DataFrame, metric: str, change: str, title: str, sub: str, kinds: list, ny_geo: dict | None = None,
-                view: str = "County", zrange: tuple | None = None, height: int | None = None) -> go.Figure:
-    """Ontario counties (or OMAFRA regions) coloured by one metric with the same scales, labels and hover as the NASS maps. vdf comes
-    from ontario.county_view: [key, Name, Region, Value, raw, prod_bu, harv, yield, share, is_estimated, ...]."""
+def _add_ontario(fig: go.Figure, vdf: pd.DataFrame, metric: str, change: str, kinds: list, view: str, zrange: tuple | None,
+                 showscale: bool) -> None:
+    """Draw Ontario counties (or OMAFRA regions) onto fig, coloured by one metric with the same scales, labels and hover as the NASS
+    maps. vdf comes from ontario.county_view: [key, Name, Region, Value, raw, prod_bu, harv, yield, share, is_estimated, ...]."""
     geo = on.load_geo()
     coll = geo["counties"] if view == "County" else geo["regions"]
     cents = geo["centroids"] if view == "County" else geo["region_centroids"]
     all_ids = [f["id"] for f in coll["features"]]
     cfg = nf.view_cfg(metric, change)
-    abs_cfg = nf.view_cfg(metric, "Current Year")
     val = dict(zip(vdf["key"], vdf["Value"]))
-    crop_bu_per_t = None
     hover = {}
     for _, r in vdf.iterrows():
         head = f"<b>{r['Name']}</b>" + (" (Est)" if r["is_estimated"] else "")
@@ -91,12 +80,6 @@ def ontario_map(vdf: pd.DataFrame, metric: str, change: str, title: str, sub: st
         if change != "Current Year":
             body += f"<br><b>{change}: {r['Value']:+.1f}%</b>"
         hover[r["key"]] = head + body
-    fig = go.Figure()
-    if ny_geo:
-        ny_ids = [f["id"] for f in ny_geo["counties"]["features"]]
-        fig.add_trace(go.Choropleth(geojson=ny_geo["counties"], featureidkey="id", locations=ny_ids, z=[0] * len(ny_ids),
-                                    colorscale=[[0, "#eceeed"], [1, "#eceeed"]], showscale=False,
-                                    marker=dict(line=dict(color="#d3d8d5", width=0.8)), hoverinfo="skip"))
     fig.add_trace(go.Choropleth(geojson=coll, featureidkey="id", locations=all_ids, z=[0] * len(all_ids),
                                 colorscale=[[0, nf.PANEL], [1, nf.PANEL]], showscale=False, marker=dict(line=LINE),
                                 hoverinfo="skip"))
@@ -106,10 +89,22 @@ def ontario_map(vdf: pd.DataFrame, metric: str, change: str, title: str, sub: st
     fig.add_trace(go.Choropleth(
         geojson=coll, featureidkey="id", locations=all_ids, z=z, zmin=z_min, zmax=z_max, colorscale=cfg["cscale"],
         marker=dict(line=LINE if view == "County" else dict(color="white", width=2.2)),
-        text=[hover.get(f, "") for f in all_ids], hovertemplate="%{text}<extra></extra>",
+        text=[hover.get(f, "") for f in all_ids], hovertemplate="%{text}<extra></extra>", showscale=showscale,
         colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=nf.TEXT, size=12)), thickness=18,
                       tickfont=dict(color=nf.TEXT, size=11), len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom",
                       bgcolor="rgba(255,255,255,0.85)")))
+    for kind in kinds:                                     # plants first, so the value labels draw on top of them
+        meta = on.NODE_KINDS[kind]
+        pts = [n for n in on.NODES if n["kind"] == kind]
+        if not pts:
+            continue
+        text = [f"<b>{p['name']}</b><br>{p['town']}" + (f"<br>{nf._wrap(p['cap'])}" if p["cap"] else "")
+                + (f"<br><i>Confidence in this entry: {p['conf']}</i>" if p["conf"] else "") for p in pts]
+        fig.add_trace(go.Scattergeo(
+            lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers", name=meta["label"],
+            marker=dict(symbol=meta["symbol"], size=meta["size"], color=meta["color"],
+                        line=dict(color="white", width=1.4)),
+            text=text, hovertemplate="%{text}<extra></extra>", showlegend=True))
     keep = [f for f in all_ids if val.get(f) is not None and not pd.isna(val.get(f))]
     if view == "County":
         nf.place_labels(fig, keep, [val[f] for f in keep], cents, cfg["label_fn"])
@@ -118,28 +113,23 @@ def ontario_map(vdf: pd.DataFrame, metric: str, change: str, title: str, sub: st
             lon=[cents[f][0] for f in keep], lat=[cents[f][1] for f in keep], mode="text",
             text=[f"{f.replace(' Ontario', '').upper()}<br>{cfg['label_fn'](val[f])}" for f in keep],
             textfont=dict(color="black", size=14, family="Arial Black"), showlegend=False, hoverinfo="skip"))
-    for kind in kinds:
-        meta = on.NODE_KINDS[kind]
-        if kind == "ny":
-            pts = [dict(name=f"Du Mond Grain - {f['name']}", town=f["name"], lat=f["lat"], lon=f["lon"], cap="", conf="")
-                   for f in nf.FACILITIES]
-        else:
-            pts = [n for n in on.NODES if n["kind"] == kind]
-        if not pts:
-            continue
-        text = [f"<b>{p['name']}</b><br>{p['town']}" + (f"<br>{nf._wrap(p['cap'])}" if p["cap"] else "")
-                + (f"<br><i>Confidence in this entry: {p['conf']}</i>" if p["conf"] else "") for p in pts]
-        fig.add_trace(go.Scattergeo(
-            lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers", name=meta["label"],
-            marker=dict(symbol=meta["symbol"], size=meta["size"], color=meta["color"],
-                        line=dict(color="#7c2d12" if kind == "ny" else "white", width=2 if kind == "ny" else 1.4)),
-            text=text, hovertemplate="%{text}<extra></extra>", showlegend=True))
-    fig.update_geos(projection_type="mercator", lonaxis_range=VIEW["lon"], lataxis_range=VIEW["lat"], visible=False,
+
+
+def combined_map(vdf: pd.DataFrame, metric: str, change: str, title: str, sub: str, kinds: list, base: go.Figure | None = None,
+                 ny_geo: dict | None = None, view: str = "County", zrange: tuple | None = None) -> go.Figure:
+    """Ontario drawn onto the New York map (base), so both share one frame, one colour scale and one colour bar. With no base,
+    Ontario alone."""
+    fig = base if base is not None else go.Figure()
+    _add_ontario(fig, vdf, metric, change, kinds, view, zrange, showscale=base is None)
+    frame = _frame(ny_geo if base is not None else None)
+    fig.update_geos(projection_type="mercator", lonaxis_range=frame["lon"], lataxis_range=frame["lat"], visible=False,
                     bgcolor=nf.DARK, landcolor=nf.LAND, showframe=False, showlakes=False)
-    fig.update_layout(**nf._base_layout(f"{title}<br><sup>{sub}</sup>", 16, 64), height=height or map_height(), dragmode=False,
+    if base is not None:                                   # park the colour bar over Pennsylvania, clear of both maps
+        fig.update_traces(colorbar=dict(x=0.31, y=0.02, len=0.24), selector=dict(type="choropleth"))
+    fig.update_layout(**nf._base_layout(f"{title}<br><sup>{sub}</sup>", 18, 64), height=map_height(frame=frame), dragmode=False,
                       legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.005, yanchor="top",
                                   bgcolor="rgba(255,255,255,0.9)", bordercolor=nf.BORDER, borderwidth=1,
-                                  font=dict(size=12, color=nf.TEXT), itemsizing="constant"))
+                                  font=dict(size=13, color=nf.TEXT), itemsizing="constant"))
     fig.update_layout(margin=dict(l=0, r=0, t=64, b=120))
     return fig
 

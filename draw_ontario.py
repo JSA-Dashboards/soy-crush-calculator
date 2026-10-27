@@ -80,9 +80,9 @@ def _zr(values: list, cfg: dict, cap: float = 100.0) -> tuple:
     return (0.0, max(vals))
 
 
-def _pair_maps(crop: str, crop_label: str, latest: int, p_latest: float, st_latest: dict, ny_geo: dict, ny_pair, ny_years) -> None:
-    """Ontario and New York maps side by side, always shown, driven by one set of controls."""
-    st.markdown('<div class="sh">Ontario and New York, side by side</div>', unsafe_allow_html=True)
+def _one_map(crop: str, crop_label: str, latest: int, p_latest: float, st_latest: dict, ny_geo: dict, ny_pair, ny_years) -> None:
+    """Ontario and New York on one map, always shown, coloured on one scale and driven by one set of controls."""
+    st.markdown('<div class="sh">Ontario and New York on one map</div>', unsafe_allow_html=True)
     years = [y for y in (ny_years or list(range(latest, 2014, -1))) if y >= 2015]
     c1, c2, c3 = st.columns([0.7, 2.0, 2.4])
     year = c1.selectbox("Year", years, index=min(1, len(years) - 1), key="on_pair_year")
@@ -92,12 +92,10 @@ def _pair_maps(crop: str, crop_label: str, latest: int, p_latest: float, st_late
     if change == "vs Selected Year":
         cc, _ = st.columns([0.7, 3])
         comp = cc.selectbox("Compare to Year", [y for y in years if y != year], key="on_pair_comp")
-    d1, d2, d3 = st.columns([1.5, 1.5, 3])
+    d1, d2 = st.columns([1.5, 4.5])
     view = d1.radio("Map view", ["County", "District"], horizontal=True, key="on_pair_view",
                     help="District = OMAFRA's five regions for Ontario and the NASS ag districts for New York.")
-    same = d2.checkbox("Same colour scale", value=True, key="on_pair_scale",
-                       help="Colour both maps against one range so Ontario and New York are directly comparable.")
-    plants = d3.checkbox("Show plants and competitors (crushers, ethanol plants, Du Mond, NY roasters and mills)", value=True,
+    plants = d2.checkbox("Show plants and competitors (crushers, ethanol plants, Du Mond, NY roasters and mills)", value=True,
                          key="on_pair_plants")
 
     is_fc = on.is_forecast(crop, year)
@@ -110,44 +108,39 @@ def _pair_maps(crop: str, crop_label: str, latest: int, p_latest: float, st_late
     cfg = nf.view_cfg(metric, change)
     on_vals = list(ov["Value"]) if not ov.empty else []
     ny_vals = list(ny["values"]) if ny else []
-    zr_on = _zr(on_vals + (ny_vals if same else []), cfg)
-    zr_ny = _zr(ny_vals + (on_vals if same else []), cfg)
-    height = max(of.map_height(), nf.map_height(ny_geo) + 90)
-    unit = "counties" if view == "County" else "regions"
-    sub = "OMAFRA county estimates on census-division boundaries" if view == "County" else "OMAFRA's five regions"
+    zr = _zr(on_vals + ny_vals, cfg)                       # one range for both, so the two are directly comparable
+    on_sub = "OMAFRA counties" if view == "County" else "OMAFRA regions"
     if is_fc:
-        sub = f"{year} forecast ({prod_kt:,.0f} kt) allocated by each county's average share of the last five years: Est"
+        on_sub = f"{year} forecast, {prod_kt:,.0f} kt split by 5-yr county share"
     elif not ov.empty and abs(ov["adj"].mean()) > on.RECONCILE_TOL:
-        sub += f" · scaled {ov['adj'].mean():+.1%} to StatCan's {on.production_kt(crop, year):,.0f} kt"
+        on_sub += f", scaled {ov['adj'].mean():+.1%} to StatCan"
+    has_ny = bool(ny and ny.get("fig") is not None)
+    sub = f"Ontario: {on_sub}" + (f"  ·  New York: {ny['unit']}" if has_ny else "")
+    view_label = metric if change == "Current Year" else f"{change} — {metric}"
+    kinds = [k for k in on.NODE_KINDS if k != "ny"] if plants else []      # the New York map already draws the Du Mond plants
 
-    left, right = st.columns(2, gap="small")
-    with left:
-        if ov.empty:
-            st.info(f"No earlier year to compare Ontario {year} with." if change != "Current Year" else "No Ontario data for this selection.")
-        else:
-            fig = of.ontario_map(ov, metric, change, f"Ontario {crop_label} {year}: {metric}", sub,
-                                 list(on.NODE_KINDS) if plants else [], ny_geo if view == "County" else None, on_view, zr_on, height)
-            of.shrink_labels(fig, 0.72)
-            st.plotly_chart(fig, use_container_width=True, key="on_pair_map_on",
-                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
-    with right:
-        if ny is None or ny.get("fig") is None:
-            st.info("No New York data for this selection." if ny is not None else "New York data is not available here.")
-        else:
-            fig = ny["fig"](zr_ny)
-            fig.update_layout(height=height, title=dict(font=dict(size=14)), dragmode=False)
-            of.shrink_labels(fig, 0.72)
-            st.plotly_chart(fig, use_container_width=True, key="on_pair_map_ny",
-                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+    base = ny["fig"](zr) if has_ny else None
+    if ov.empty:
+        st.info(f"No earlier year to compare Ontario {year} with." if change != "Current Year" else "No Ontario data for this selection.")
+        fig = base
+    else:
+        fig = of.combined_map(ov, metric, change, f"{crop_label} {year} — {view_label} | Ontario and New York", sub, kinds, base, ny_geo,
+                              on_view, zr)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True, key="on_pair_map",
+                        config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
     notes = []
+    if not has_ny:
+        notes.append("No New York data for this selection.")
     if is_fc:
         notes.append(f"Ontario {year}: no county data yet, so the selected provincial estimate is split by each county's olympic-average "
                      "share of production and acres over the last five years (the NASS tab's forecast method).")
     elif not ov.empty and abs(ov["adj"].mean()) > on.RECONCILE_TOL:
-        notes.append("Ontario county values are reconciled to OMAFRA's regional subtotals and then to StatCan's provincial total.")
+        notes.append("Ontario county values are reconciled to OMAFRA's regional subtotals and then to StatCan's provincial total "
+                     f"({on.production_kt(crop, year):,.0f} kt).")
     if ny and ny.get("note"):
         notes.append(ny["note"])
-    notes.append("Hover a county for the detail. Both maps use the same crop, year, metric and view" + (" and one colour scale." if same else "."))
+    notes.append("Hover a county for the detail. Ontario and New York share the crop, year, metric, view and one colour scale.")
     st.caption(" ".join(notes))
 
 
@@ -168,7 +161,7 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
     p_latest, p_prev = on.production_kt(crop, latest), on.production_kt(crop, prev)
     st_latest = on.statcan(crop, latest)
 
-    _pair_maps(crop, crop_label, latest, p_latest, st_latest, ny_geo, ny_pair, ny_years)
+    _one_map(crop, crop_label, latest, p_latest, st_latest, ny_geo, ny_pair, ny_years)
 
     # ── headline numbers ──────────────────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
