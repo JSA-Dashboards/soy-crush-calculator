@@ -115,3 +115,41 @@ def county_map(df: pd.DataFrame, metric: str, title: str, sub: str, kinds: list,
                                   font=dict(size=13, color=nf.TEXT), itemsizing="constant"))
     fig.update_layout(margin=dict(l=0, r=0, t=64, b=120))
     return fig
+
+
+def history_chart(crop: str, sel_kt: float, since: int = 1990) -> go.Figure:
+    """Ontario production by year (StatCan), with the latest year at the estimate you picked and a ten-year average."""
+    h = on.history(crop, since)
+    latest = on.latest_statcan_year(crop)
+    y = [sel_kt if int(yr) == latest else kt for yr, kt in zip(h["year"], h["kt"])]
+    avg10 = h[h["year"] < latest]["kt"].tail(10).mean()
+    colors = ["#0693e3" if int(yr) == latest else "#9bb0a2" for yr in h["year"]]
+    fig = go.Figure(go.Bar(x=h["year"], y=y, marker_color=colors, marker_line_width=0,
+                           hovertemplate="%{x}: %{y:,.0f} kt<extra></extra>"))
+    fig.add_hline(y=avg10, line_dash="dash", line_color="#d97706", line_width=1.5,
+                  annotation_text=f"Last 10-year average {avg10:,.0f} kt", annotation_position="top left",
+                  annotation_font=dict(color="#d97706", size=10))
+    fig.update_layout(height=340, paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE, font=dict(color=nf.TEXT, family="Arial"),
+                      margin=dict(l=60, r=20, t=50, b=40), showlegend=False,
+                      title=dict(text=f"Ontario production since {since} (kt): {latest} at the selected estimate",
+                                 font=dict(size=14, color=nf.ACCENT)),
+                      xaxis=dict(tickfont=dict(color=nf.MUTED), gridcolor=nf.BORDER),
+                      yaxis=dict(tickformat=",.0f", gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)))
+    return fig
+
+
+def tour_chart(crop: str) -> go.Figure:
+    """August yield-tour forecast against StatCan's yield, year by year."""
+    t = on.tour_table(crop)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=t["year"], y=t["tour"], name="Yield tour (August)", marker_color="#f59e0b", marker_line_width=0,
+                         hovertemplate="Tour: %{y:.1f} bu/ac<extra></extra>"))
+    fig.add_trace(go.Bar(x=t["year"], y=t["statcan"], name="StatCan (latest year = model)", marker_color="#5e7164",
+                         marker_line_width=0, hovertemplate="StatCan: %{y:.1f} bu/ac<extra></extra>"))
+    fig.update_layout(barmode="group", height=360, paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE,
+                      font=dict(color=nf.TEXT, family="Arial"), margin=dict(l=60, r=20, t=50, b=80),
+                      title=dict(text="Yield tour vs StatCan yield (bu/ac)", font=dict(size=14, color=nf.ACCENT)),
+                      legend=dict(orientation="h", y=-0.14, x=0.5, xanchor="center", yanchor="top", font=dict(size=11)),
+                      xaxis=dict(tickvals=list(t["year"]), gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)),
+                      yaxis=dict(gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED), rangemode="tozero"))
+    return fig

@@ -186,3 +186,99 @@ def county_table(crop: str, year: int, scale: bool) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["Share"] = df["Production (kt)"] / df["Production (kt)"].sum() if len(df) else np.nan
     return df.sort_values("Production (kt)", ascending=False).reset_index(drop=True)
+
+
+# ── how fresh is the crop estimate, and what does it mean historically ───────
+# Great Ontario Yield Tour (Farms.com Risk Management): provincial yield forecast made in August, (corn, soy) bu/ac.
+TOUR = {2016: (149.0, 43.0), 2017: (163.2, 45.7), 2018: (179.5, 50.2), 2019: (173.2, 43.6), 2020: (183.3, 53.2),
+        2021: (191.5, 51.7), 2022: (186.6, 50.3), 2023: (203.0, 53.5), 2024: (194.75, 54.12), 2025: (178.93, 46.61),
+        2026: (206.0, 55.0)}
+TOUR_SOURCE = "Great Ontario Yield Tour results pages, riskmanagement.farms.com (provincial estimate announced in August)"
+TRADE_JUNE = {"soy": 4300.0, "corn": 10200.0}      # Farmtario / Jerry Klassen, 2026-06-27 (before the yield tour)
+
+
+def tour_table(crop: str) -> pd.DataFrame:
+    """Tour forecast against StatCan's figure for each year (the latest year is StatCan's model estimate, not final)."""
+    i = 0 if crop == "corn" else 1
+    rows = []
+    for y, v in sorted(TOUR.items()):
+        sc = statcan(crop, y).get("yield_bu")
+        if sc:
+            rows.append({"year": y, "tour": v[i], "statcan": sc, "ratio": sc / v[i], "final": y < latest_statcan_year(crop)})
+    return pd.DataFrame(rows)
+
+
+def tour_factor(crop: str) -> float:
+    """Median StatCan-to-tour yield ratio over the years StatCan has finalised: the tour's bias."""
+    t = tour_table(crop)
+    return float(t[t["final"]]["ratio"].median())
+
+
+def estimates(crop: str) -> list:
+    """Estimates of the latest crop, newest official first: [{label, when, yield_bu, kt, note}]."""
+    y = latest_statcan_year(crop)
+    sc = statcan(crop, y)
+    ac = sc.get("harvested_ac") or 0.0
+    out = [{"label": "StatCan model-based estimate", "when": "Sep 16", "yield_bu": sc.get("yield_bu"),
+            "kt": sc["prod_t"] / 1000.0, "note": "Satellite + weather + crop-insurance model; final survey figure due Dec 4."}]
+    if y in TOUR:
+        raw = TOUR[y][0 if crop == "corn" else 1]
+        for label, yld, note in (
+                ("Yield tour, calibrated to StatCan", raw * tour_factor(crop),
+                 f"Tour yield x {tour_factor(crop):.3f}, its median StatCan-to-tour ratio since 2016."),
+                ("Yield tour, as published", raw, "Field counts in August, scaled to StatCan's harvested area.")):
+            out.append({"label": label, "when": "Aug 27", "yield_bu": yld, "kt": yld * ac / BU_PER_T[crop] / 1000.0, "note": note})
+    if crop in TRADE_JUNE and y == 2026:
+        out.append({"label": "Trade estimate (Farmtario)", "when": "Jun 27", "yield_bu": None, "kt": TRADE_JUNE[crop],
+                    "note": "Market commentary before the tour and StatCan's model; not a survey."})
+    return out
+
+
+def history(crop: str, since: int = 1990) -> pd.DataFrame:
+    rows = [{"year": int(y), "kt": v["prod_t"] / 1000.0, "yield_bu": v.get("yield_bu"), "harvested_ac": v.get("harvested_ac")}
+            for y, v in load()["statcan"][crop].items() if int(y) >= since and "prod_t" in v]
+    return pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
+
+
+def rank_info(crop: str, kt: float) -> dict:
+    """Where a production figure sits among the years since 1990 (the latest year excluded)."""
+    h = history(crop)
+    prior = h[h["year"] < latest_statcan_year(crop)]
+    avg5, avg10 = prior["kt"].tail(5).mean(), prior["kt"].tail(10).mean()
+    return {"rank": int((prior["kt"] > kt).sum()) + 1, "of": len(prior) + 1, "vs_avg5": kt / avg5 - 1, "vs_avg10": kt / avg10 - 1,
+            "max_year": int(prior.loc[prior["kt"].idxmax(), "year"]), "max_kt": float(prior["kt"].max()),
+            "avg5": float(avg5), "avg10": float(avg10)}
+
+
+def farm_stocks(crop: str) -> pd.DataFrame:
+    """Latest Dec 31, Mar 31 and Jul 31 farm stocks (kt) against a year earlier and the prior five-year average."""
+    s = load()["stocks"][crop]
+    last = max(s)
+    rows = []
+    for mm, lab in (("12", "Dec 31"), ("03", "Mar 31"), ("07", "Jul 31")):
+        ys = sorted(int(k[:4]) for k in s if k.endswith("-" + mm))
+        y = max(yy for yy in ys if f"{yy}-{mm}" <= last)
+        cur = s[f"{y}-{mm}"]
+        prev5 = [s[f"{yy}-{mm}"] for yy in range(y - 5, y) if f"{yy}-{mm}" in s]
+        rows.append({"date": f"{lab} {y}", "kt": cur, "year_ago": s.get(f"{y - 1}-{mm}"), "avg5": sum(prev5) / len(prev5) if prev5 else None})
+    df = pd.DataFrame(rows)
+    df["vs_year_ago"] = df["kt"] / df["year_ago"] - 1
+    df["vs_avg5"] = df["kt"] / df["avg5"] - 1
+    return df
+
+
+def backcast(crop: str, production_kt: float, since: int = 2019) -> pd.DataFrame:
+    """Run a production figure through each past crop year's own opening stocks, firm use and carryout: what would the
+    crop have meant for exports then? Also the carryout if exports had been what they actually were."""
+    df = sd_table(crop)
+    done = df[df["complete"] & (df.index >= since)]
+    firm_keys = [k for _, k in LINES[crop]["firm"] if k in done]
+    exp_key, end_key = LINES[crop]["exports"][1], LINES[crop]["ending"][1]
+    rows = []
+    for y, r in done.iterrows():
+        imp = r["imports"] if crop == "corn" else 0.0
+        avail = r["beginning"] + production_kt + imp - sum(r[k] for k in firm_keys)
+        rows.append({"year": int(y), "label": crop_year_label(int(y)), "begin": r["beginning"], "firm": sum(r[k] for k in firm_keys),
+                     "ending": r[end_key], "implied_exports": avail - r[end_key], "actual_exports": r[exp_key],
+                     "carryout_same_exports": avail - r[exp_key], "actual_production": r["production"]})
+    return pd.DataFrame(rows)

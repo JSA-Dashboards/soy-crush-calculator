@@ -29,6 +29,7 @@ HERE = Path(__file__).parent
 UA = {"User-Agent": "Mozilla/5.0 (jsa-soy-crush-calculator Ontario build)"}
 
 STATCAN_ZIP = "https://www150.statcan.gc.ca/n1/tbl/csv/32100359-eng.zip"
+STATCAN_STOCKS_ZIP = "https://www150.statcan.gc.ca/n1/tbl/csv/32100007-eng.zip"
 ODC = "https://data.ontario.ca/dataset"
 FILES = {
     "sd_soy": f"{ODC}/402e1e3c-5a77-415b-8351-4b3be113253f/resource/1de3d22e-8179-403a-b142-7602d28f22c3/download/sd_soybeans.xlsx",
@@ -139,6 +140,19 @@ def statcan() -> dict:
         v = num(r["VALUE"])
         if key and v is not None:
             out[crops[r["Type of crop"]]].setdefault(r["REF_DATE"], {})[key] = v
+    return out
+
+
+def stocks() -> dict:
+    """Ontario farm stocks (kt) at Dec 31, Mar 31 and Jul 31 from table 32-10-0007-01: {crop: {'YYYY-MM': kt}}."""
+    z = zipfile.ZipFile(io.BytesIO(get(STATCAN_STOCKS_ZIP)))
+    out = {"corn": {}, "soy": {}}
+    crops = {"Corn for grain": "corn", "Soybeans": "soy"}
+    for r in csv.DictReader(io.TextIOWrapper(z.open("32100007.csv"), encoding="utf-8-sig")):
+        if r["GEO"] == "Ontario" and r["Type of crop"] in crops and r["REF_DATE"] >= "1990-01":
+            v = num(r["VALUE"])
+            if v is not None:
+                out[crops[r["Type of crop"]]][r["REF_DATE"]] = v
     return out
 
 
@@ -255,6 +269,8 @@ def geometry() -> dict:
 def main() -> int:
     print("StatCan Ontario series ...")
     sc = statcan()
+    print("StatCan Ontario farm stocks ...")
+    stk = stocks()
     print("OMAFRA supply and disposition ...")
     sds = {"soy": sd(get(FILES["sd_soy"]), "soy"), "corn": sd(get(FILES["sd_corn"]), "corn")}
     print("OMAFRA county files ...")
@@ -266,7 +282,7 @@ def main() -> int:
     data = {"generated": datetime.date.today().isoformat(),
             "sources": {"statcan": "Statistics Canada table 32-10-0359-01", "omafra": "Ontario Data Catalogue (OMAFRA), "
                         "Open Government Licence - Ontario", "geometry": "Statistics Canada 2021 census division cartographic boundaries"},
-            "statcan": sc, "sd": sds, "county": cty}
+            "statcan": sc, "stocks": stk, "sd": sds, "county": cty}
     (HERE / "ontario_data.json").write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
     print("Census division geometry ...")
     geo = geometry()
