@@ -95,19 +95,18 @@ def _add_ontario(fig: go.Figure, vdf: pd.DataFrame, metric: str, change: str, ki
                       bgcolor="rgba(255,255,255,0.85)")))
     for kind in kinds:                                     # plants first, so the value labels draw on top of them
         meta = on.NODE_KINDS[kind]
-        for idle in (False, True):                         # idle plants get their own hollow marker and legend entry
-            pts = [n for n in on.NODES if n["kind"] == kind and (n.get("status") == "idle") == idle]
-            if not pts:
-                continue
-            text = [f"<b>{p['name']}</b><br>{p['town']}" + ("<br><i>Idle</i>" if idle else "")
-                    + (f"<br>{nf._wrap(p['cap'])}" if p["cap"] else "")
-                    + (f"<br><i>Confidence in this entry: {p['conf']}</i>" if p["conf"] else "") for p in pts]
-            fig.add_trace(go.Scattergeo(
-                lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers",
-                name=meta["label"] + (", idle" if idle else ""),
-                marker=dict(symbol=meta["symbol"] + ("-open" if idle else ""), size=meta["size"], color=meta["color"],
-                            line=dict(color=meta["color"] if idle else "white", width=3 if idle else 1.4)),
-                text=text, hovertemplate="%{text}<extra></extra>", showlegend=True))
+        pts = [n for n in on.NODES if n["kind"] == kind]
+        if not pts:
+            continue
+        text = [f"<b>{p['name']}</b><br>{p['town']}" + (f"<br>{nf._wrap(p['cap'])}" if p["cap"] else "")
+                + (f"<br><i>Confidence in this entry: {p['conf']}</i>" if p["conf"] else "") for p in pts]
+        # the New York figure already lists the ethanol marker; share its legend entry rather than repeat it
+        shared = any(t.legendgroup == kind and t.showlegend for t in fig.data)
+        fig.add_trace(go.Scattergeo(
+            lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers", name=meta["label"], legendgroup=kind,
+            marker=dict(symbol=meta["symbol"], size=meta["size"], color=meta["color"],
+                        line=dict(color="white", width=1.4)),
+            text=text, hovertemplate="%{text}<extra></extra>", showlegend=not shared))
     keep = [f for f in all_ids if val.get(f) is not None and not pd.isna(val.get(f))]
     if view == "County":
         nf.place_labels(fig, keep, [val[f] for f in keep], cents, cfg["label_fn"])

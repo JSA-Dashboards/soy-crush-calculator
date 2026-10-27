@@ -126,16 +126,16 @@ _STAR_COLOR, _STAR_EDGE = "#fbbf24", "#7c2d12"
 LABEL_ANCHORS = {"Western": (-78.55, 43.08), "Central": (-75.5, 43.0)}
 
 
-def _repel(lon: float, lat: float, r: float):
-    """Move a label out to r degrees from any facility star so the star never covers it."""
+def _repel(lon: float, lat: float, r: float, pts=None):
+    """Move a label out to r degrees from any marker point (default: the facility stars) so the marker never covers it."""
     k = math.cos(math.radians(43.0))
-    for fac in FACILITIES:
-        dx, dy = (lon - fac["lon"]) * k, lat - fac["lat"]
+    for plon, plat in ([(f["lon"], f["lat"]) for f in FACILITIES] if pts is None else pts):
+        dx, dy = (lon - plon) * k, lat - plat
         d = math.hypot(dx, dy)
         if d < r:
             if d < 1e-6:
                 dx, dy, d = 0.0, 1.0, 1.0
-            lon, lat = fac["lon"] + dx * r / d / k, fac["lat"] + dy * r / d
+            lon, lat = plon + dx * r / d / k, plat + dy * r / d
     return lon, lat
 
 
@@ -202,7 +202,8 @@ def frame_map(fig, geo: dict) -> None:
                     visible=False, bgcolor=DARK, landcolor=LAND, showframe=False, showlakes=False)
 
 
-def place_labels(fig, fips_list, values, centroids, label_fn):
+def place_labels(fig, fips_list, values, centroids, label_fn, avoid=()):
+    """avoid = extra (lon, lat) marker points a label should keep clear of, on top of the facility stars."""
     areas = [centroids[f][2] for f in fips_list if f in centroids]
     if areas:
         avg_area = float(np.mean(areas))
@@ -222,6 +223,8 @@ def place_labels(fig, fips_list, values, centroids, label_fn):
         if not any((cx - px) ** 2 + (cy - py) ** 2 < min_sep ** 2 for px, py in placed):
             placed.append((cx, cy))
             cx, cy = _repel(cx, cy, 0.2)
+            if avoid:
+                cx, cy = _repel(cx, cy, 0.3, avoid)
             lons.append(cx)
             lats.append(cy)
             texts.append(label)
@@ -285,9 +288,27 @@ def add_competition(fig, geo: dict, cats=None) -> int:
     return n
 
 
+def add_ethanol(fig) -> None:
+    """New York's corn-ethanol plants: a solid marker for a running plant, a hollow one (own legend entry) for an idle plant. The
+    running marker shares a legend group with Ontario's ethanol plants on the combined map."""
+    sty = ny_ho.ETHANOL_STYLE
+    for idle in (False, True):
+        pts = [p for p in ny_ho.ETHANOL_PLANTS if (p.get("status") == "idle") == idle]
+        if not pts:
+            continue
+        hover = [f"<b>{p['name']}</b>" + ("<br><i>Idle</i>" if idle else "") + f"<br>{p['town']}<br>{_wrap(p['cap'])}"
+                 + (f"<br>{_wrap(p['note'])}" if p["note"] else "") + f"<br><i>Confidence in this entry: {p['conf']}</i>" for p in pts]
+        fig.add_trace(go.Scattergeo(
+            lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers",
+            name=sty["label"] + (", idle" if idle else ""), legendgroup="ethanol_idle" if idle else "ethanol",
+            marker=dict(symbol=sty["symbol"] + ("-open" if idle else ""), size=sty["size"], color=sty["color"],
+                        line=dict(color=sty["color"] if idle else "white", width=3 if idle else 1.4)),
+            text=hover, hovertemplate="%{text}<extra></extra>", showlegend=True))
+
+
 # ── maps ──────────────────────────────────────────────────────────────────────
 def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None,
-               src: str = "NASS", zrange: tuple | None = None):
+               src: str = "NASS", zrange: tuple | None = None, ethanol: bool = False):
     """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
     if df is None or df.empty:
         return None
@@ -317,17 +338,20 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
         colorbar=dict(title=dict(text=cfg["clabel"], font=dict(color=TEXT, size=13)), tickfont=dict(color=TEXT, size=12),
                       thickness=22, len=0.34, x=0.01, xanchor="left", y=0.02, yanchor="bottom", bgcolor="rgba(255,255,255,0.85)")))
     cents = geo["centroids"]
+    eth = [(p["lon"], p["lat"]) for p in ny_ho.ETHANOL_PLANTS] if ethanol else ()     # keep county labels clear of the plants
     est_fips = [f for f in all_fips if est.get(f) and f in cents]
     if est_fips:
-        pts = [_repel(cents[f][0], cents[f][1], 0.2) for f in est_fips]
+        pts = [_repel(*_repel(cents[f][0], cents[f][1], 0.2), 0.3, eth) for f in est_fips]
         fig.add_trace(go.Scattergeo(lon=[p[0] for p in pts], lat=[p[1] for p in pts],
                                     mode="text", text=["Est"] * len(est_fips),
                                     textfont=dict(color="#374151", size=11, family="Arial Black"),
                                     showlegend=False, hoverinfo="skip"))
     rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and not est.get(f)]
-    place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"])
+    place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"], avoid=eth)
     if competition:
         add_competition(fig, geo, competition)
+    if ethanol:
+        add_ethanol(fig)
     add_facilities(fig, "bottom" if competition else "tl")
     sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
     frame_map(fig, geo)
@@ -346,7 +370,7 @@ def _exteriors(geom):
 
 def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: str, year: int,
                  metric: str, change_view: str, est_districts: set, competition=None, src: str = "NASS",
-                 zrange: tuple | None = None):
+                 zrange: tuple | None = None, ethanol: bool = False):
     """Counties coloured by ASD district value, bold district boundaries, name + value labels."""
     if view_df is None or view_df.empty:
         return None
@@ -410,6 +434,8 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
                                 showlegend=False, hoverinfo="skip"))
     if competition:
         add_competition(fig, geo, competition)
+    if ethanol:
+        add_ethanol(fig)
     add_facilities(fig, "bottom" if competition else "tl")
     frame_map(fig, geo)
     fig.update_layout(**{**_base_layout(f"{src} {year} {crop} — {view_label} | New York AG Districts", 18, 56),

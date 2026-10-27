@@ -266,12 +266,17 @@ def _nass_tab() -> None:
         k4.metric("Counties Below Prior", f"{int((vals < 0).sum()):,} ▼")
 
     # ── map view ──────────────────────────────────────────────────────────────
-    mv1, mv2 = st.columns([1, 2])
+    mv1, mv2, mv3 = st.columns([1, 1.7, 1.1])
     mv1.radio("Map View", ["ASD District", "County"], horizontal=True, key="ny_map_view")
     map_view = st.session_state["ny_map_view"]
     with mv2:
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         show_comp = st.checkbox("Show competition on the map (roasters, mills, dealers, crushers)", key="ny_comp_nass")
+    with mv3:
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        show_eth = st.checkbox("Show ethanol plants", value=True, key="ny_ethanol_nass",
+                               help="New York's two corn-ethanol plants: Western New York Energy at Medina (running) and the "
+                                    "Fulton plant (idle, hollow marker).")
     comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
 
     if map_view == "ASD District":
@@ -281,7 +286,7 @@ def _nass_tab() -> None:
         if stat in nd.ESTIMABLE and not is_fc:
             comp_df = cobj.completed(stat, year, adj)
             n_est = int(comp_df["is_estimated"].sum()) if not comp_df.empty else 0
-        fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d, comp_cats)
+        fig = nf.district_fig(view_df, cur_df, geo, crop, year, metric, change, est_d, comp_cats, ethanol=show_eth)
         if fig is None:
             st.info("ASD district map not available for this selection.")
         else:
@@ -320,7 +325,7 @@ def _nass_tab() -> None:
                                f"({_fmt_val(metric, abs_val)}): NASS publishes its county and state estimates separately.")
     else:
         cdf = cobj.county_view(metric, year, change, comp, adj)
-        fig = nf.county_fig(cdf, geo, crop, year, metric, change, comp_cats)
+        fig = nf.county_fig(cdf, geo, crop, year, metric, change, comp_cats, ethanol=show_eth)
         if fig is None:
             st.info("County map not available for this selection (county estimates are published after harvest)."
                     if is_fc else "County map not available for this selection.")
@@ -958,7 +963,8 @@ def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: s
             if n_est:
                 note = f"New York: {n_est} counties NASS withholds are estimated (Est)."
             return {"values": [v for v in cdf["Value"] if pd.notna(v)], "note": note, "unit": "NASS counties",
-                    "fig": lambda z: nf.county_fig(cdf, geo, crop_label, year, metric, change, comp_cats, zrange=z)}
+                    "fig": lambda z: nf.county_fig(cdf, geo, crop_label, year, metric, change, comp_cats, zrange=z,
+                                                   ethanol=show_comp)}
         return {"values": [], "fig": None, "note": ""}
     fc_stats: dict = {}
     if is_fc:
@@ -972,7 +978,8 @@ def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: s
     if view_df is None or view_df.empty:
         return {"values": [], "fig": None, "note": note}
     return {"values": [v for v in view_df["Value"] if pd.notna(v)], "note": note, "unit": "NASS ag districts",
-            "fig": lambda z: nf.district_fig(view_df, cur_df, geo, crop_label, year, metric, change, est_d, comp_cats, zrange=z)}
+            "fig": lambda z: nf.district_fig(view_df, cur_df, geo, crop_label, year, metric, change, est_d, comp_cats, zrange=z,
+                                             ethanol=show_comp)}
 
 
 # ── livestock: Census county / ASD view, then the annual state survey ─────────

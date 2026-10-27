@@ -97,6 +97,23 @@ COMPETITORS = [
          note="Lists roasted soybeans on its dealer licence. Not on the map."),
 ]
 
+# New York's two corn-ethanol plants, checked 2026-10-27 (EIA, RFA, local news). Drawn on the NASS maps and on the Ontario + New York
+# map, and shares its marker with Ontario's ethanol plants. status="idle" draws a hollow marker. conf = how well the entry is sourced.
+ETHANOL_STYLE = {"label": "Ethanol plant (corn)", "color": "#ea580c", "symbol": "diamond", "size": 17}
+ETHANOL_PLANTS = [
+    dict(name="Western New York Energy - Medina", town="Medina (Orleans Co., NY)", lat=43.2112, lon=-78.3661, conf="high",
+         cap="~62 million gal/yr of fuel ethanol (EIA, Jan 1 2025), roughly 22 million bu of corn a year at 2.8 gal/bu "
+             "(our arithmetic); runs about 30% over its 50 million gal design. The RFA (Oct 2025) calls it New York's "
+             "only large-scale plant. Also makes high-purity alcohol after a $38 million expansion.",
+         note="The in-state outlet for New York corn."),
+    dict(name="Fulton ethanol plant (ex-Sunoco, Attis)", town="Volney, south of Fulton (Oswego Co., NY)", lat=43.2990, lon=-76.3801,
+         conf="medium", status="idle",
+         cap="85-100 million gal/yr nameplate (sources differ). Built by Northeast Biofuels in 2008, bought by Sunoco in 2009 and "
+             "restarted in 2010, sold to Attis in 2019. Idle since Attis failed to run it; Oswego County took the site and sold it "
+             "at auction in July 2025 (one local report: $4.9 million).",
+         note="No restart found in the coverage checked."),
+]
+
 # Milk cows by county, January 2023 (head), as given in the notes. Counties not listed are treated as 0
 # in the score (e.g. Oswego, Otsego, Yates, Warren were not in the list); Suffolk and Westchester withheld.
 DAIRY_COWS = {

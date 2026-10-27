@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 import ny_asd_figs as nf
+import ny_ho
 import ontario as on
 import ontario_figs as of
 import ontario_trade as ot
@@ -500,7 +501,7 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
 
     with st.expander("Demand nodes and what we know about them", expanded=False):
         for kind, meta in on.NODE_KINDS.items():
-            items = [n for n in on.NODES if n["kind"] == kind]
+            items = [n for n in on.NODES if n["kind"] == kind] + (ny_ho.ETHANOL_PLANTS if kind == "ethanol" else [])
             if not items:
                 continue
             st.markdown(f"<span style='color:{meta['color']};font-weight:700;'>● {meta['label']}</span>", unsafe_allow_html=True)
