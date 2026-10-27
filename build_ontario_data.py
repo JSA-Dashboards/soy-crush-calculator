@@ -24,6 +24,7 @@ from pathlib import Path
 
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.geometry.polygon import orient
+from shapely.ops import unary_union
 
 HERE = Path(__file__).parent
 UA = {"User-Agent": "Mozilla/5.0 (jsa-soy-crush-calculator Ontario build)"}
@@ -208,7 +209,8 @@ def county(blob: bytes, bu_per_tonne: float) -> dict:
                 cols["kt"] = i
         if not {"seeded", "harvested", "kt"} <= set(cols):
             raise RuntimeError(f"unexpected county sheet layout in {name}: {hdr}")
-        rec = {"counties": {}, "regions": {}, "ontario": None}
+        rec = {"counties": {}, "regions": {}, "ontario": None, "region_of": {}}
+        pending = []                               # counties are listed first, then the regional subtotal that closes them
         for r in rows:
             label = clean_name(r.get(0) or "")
             vals = [num(r.get(cols[k])) if k in cols else None for k in ("seeded", "harvested", "yield", "kbu", "kt")]
@@ -222,8 +224,11 @@ def county(blob: bytes, bu_per_tonne: float) -> dict:
                 rec["ontario"] = vals
             elif REGION.match(label):
                 rec["regions"][label] = vals
+                rec["region_of"].update({c: label for c in pending})
+                pending = []
             else:
                 rec["counties"][label] = vals
+                pending.append(label)
         out[m.group(1)] = rec
     return out
 
@@ -238,11 +243,16 @@ def tidy_geom(geom, tol: float, min_area: float):
     return keep[0] if len(keep) == 1 else MultiPolygon(keep)       # Plotly's renderer needs CLOCKWISE exteriors
 
 
-def geometry() -> dict:
+# Census divisions OMAFRA does not list; placed in the region they sit in so the region polygons have no holes.
+FALLBACK_REGION = {"3520": "Central Ontario", "3558": "Northern Ontario"}
+
+
+def geometry(region_of: dict) -> dict:
     attrs = json.loads(get(CD_LAYER, {"where": "PRUID='35'", "outFields": "CDUID,CDNAME", "returnGeometry": "false", "f": "json"}))
     cds = {f["attributes"]["CDUID"]: f["attributes"]["CDNAME"] for f in attrs["features"]}
     by_cd = {v: k for k, v in COUNTY_CD.items()}
     feats, cents = [], {}
+    shapes = {}
     cache = Path(os.environ["GEO_CACHE_DIR"]) if os.environ.get("GEO_CACHE_DIR") else None
     for uid in sorted(cds):
         raw = cache / f"{uid}.geojson" if cache else None
@@ -258,11 +268,29 @@ def geometry() -> dict:
         simple = tidy_geom(geom, 0.04 if north else 0.012, 0.02 if north else 0.002)
         c = simple.representative_point() if not simple.contains(simple.centroid) else simple.centroid
         name = by_cd.get(uid, cds[uid])
+        shapes[uid] = simple
         feats.append({"type": "Feature", "id": uid, "properties": {"NAME": name},
                       "geometry": json.loads(json.dumps(mapping(simple)), parse_float=lambda s: round(float(s), 3))})
         cents[uid] = [round(c.x, 3), round(c.y, 3), round(simple.area, 4)]
         print(f"   {uid} {name:32s} {len(json.dumps(feats[-1])) / 1024:6.1f} KB")
+    groups: dict = {}
+    for uid, g in shapes.items():
+        reg = region_of.get(by_cd.get(uid, "")) or FALLBACK_REGION.get(uid)
+        if reg:
+            groups.setdefault(reg, []).append(g)
+        else:
+            print("   no region for", uid, cds[uid])
+    reg_feats, reg_cents = [], {}
+    for reg, geoms in sorted(groups.items()):
+        merged = unary_union(geoms).buffer(0.004).buffer(-0.004)          # close slivers between separately simplified edges
+        merged = tidy_geom(merged, 0.01, 0.002)
+        c = merged.representative_point() if not merged.contains(merged.centroid) else merged.centroid
+        reg_feats.append({"type": "Feature", "id": reg, "properties": {"NAME": reg},
+                          "geometry": json.loads(json.dumps(mapping(merged)), parse_float=lambda s: round(float(s), 3))})
+        reg_cents[reg] = [round(c.x, 3), round(c.y, 3), round(merged.area, 4)]
+        print(f"   region {reg:18s} {len(geoms):2d} divisions {len(json.dumps(reg_feats[-1])) / 1024:6.1f} KB")
     return {"counties": {"type": "FeatureCollection", "features": feats}, "centroids": cents,
+            "regions": {"type": "FeatureCollection", "features": reg_feats}, "region_centroids": reg_cents,
             "cd_name": cds, "county_cd": COUNTY_CD}
 
 
@@ -279,13 +307,17 @@ def main() -> int:
     if missing:
         print("County names with no census division:", missing)
         return 1
-    data = {"generated": datetime.date.today().isoformat(),
+    region_of = {**cty["corn"]["2025"]["region_of"], **cty["soy"]["2025"]["region_of"]}
+    for crop_years in cty.values():                      # one copy of the mapping is enough
+        for rec in crop_years.values():
+            rec.pop("region_of", None)
+    data = {"generated": datetime.date.today().isoformat(), "region_of": region_of,
             "sources": {"statcan": "Statistics Canada table 32-10-0359-01", "omafra": "Ontario Data Catalogue (OMAFRA), "
                         "Open Government Licence - Ontario", "geometry": "Statistics Canada 2021 census division cartographic boundaries"},
             "statcan": sc, "stocks": stk, "sd": sds, "county": cty}
     (HERE / "ontario_data.json").write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
     print("Census division geometry ...")
-    geo = geometry()
+    geo = geometry(region_of)
     (HERE / "ontario_geo.json").write_text(json.dumps(geo, separators=(",", ":")), encoding="utf-8")
     for n in ("ontario_data.json", "ontario_geo.json"):
         print(f"wrote {n}: {(HERE / n).stat().st_size / 1024:.0f} KB")

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import ny_asd_figs as nf
 import ontario as on
 import ontario_figs as of
 import ontario_trade as ot
@@ -68,7 +69,89 @@ def _apply_estimate(crop: str) -> None:
     st.session_state[_k(crop, "p_latest")] = float(round(picked["kt"]))
 
 
-def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_geo: dict) -> None:
+def _zr(values: list, cfg: dict, cap: float = 100.0) -> tuple:
+    """Colour range for a set of values: zero up to the largest, or symmetric (capped at +/-cap %) for the change views."""
+    vals = [v for v in values if v is not None and not pd.isna(v)]
+    if not vals:
+        return (0.0, 1.0)
+    if cfg["diverging"]:
+        m = min(max(abs(min(vals)), abs(max(vals)), 1.0), cap)
+        return (-m, m)
+    return (0.0, max(vals))
+
+
+def _pair_maps(crop: str, crop_label: str, latest: int, p_latest: float, st_latest: dict, ny_geo: dict, ny_pair, ny_years) -> None:
+    """Ontario and New York maps side by side, always shown, driven by one set of controls."""
+    st.markdown('<div class="sh">Ontario and New York, side by side</div>', unsafe_allow_html=True)
+    years = [y for y in (ny_years or list(range(latest, 2014, -1))) if y >= 2015]
+    c1, c2, c3 = st.columns([0.7, 2.0, 2.4])
+    year = c1.selectbox("Year", years, index=min(1, len(years) - 1), key="on_pair_year")
+    metric = c2.radio("Metric", on.METRICS, horizontal=True, key="on_pair_metric")
+    change = c3.radio("View", on.CHANGE_OPTS, horizontal=True, key="on_pair_change")
+    comp = None
+    if change == "vs Selected Year":
+        cc, _ = st.columns([0.7, 3])
+        comp = cc.selectbox("Compare to Year", [y for y in years if y != year], key="on_pair_comp")
+    d1, d2, d3 = st.columns([1.5, 1.5, 3])
+    view = d1.radio("Map view", ["County", "District"], horizontal=True, key="on_pair_view",
+                    help="District = OMAFRA's five regions for Ontario and the NASS ag districts for New York.")
+    same = d2.checkbox("Same colour scale", value=True, key="on_pair_scale",
+                       help="Colour both maps against one range so Ontario and New York are directly comparable.")
+    plants = d3.checkbox("Show plants and competitors (crushers, ethanol plants, Du Mond, NY roasters and mills)", value=True,
+                         key="on_pair_plants")
+
+    is_fc = on.is_forecast(crop, year)
+    prod_kt = float(st.session_state.get(_k(crop, "p_latest"), p_latest))
+    acres = st_latest.get("harvested_ac")
+    on_view = "County" if view == "County" else "Region"
+    ov = on.county_view(crop, metric, year, change, comp, on_view, prod_kt if is_fc else None, acres if is_fc else None)
+    ny = ny_pair(crop_label, year, metric, change, comp, "County" if view == "County" else "ASD District", plants) if ny_pair else None
+
+    cfg = nf.view_cfg(metric, change)
+    on_vals = list(ov["Value"]) if not ov.empty else []
+    ny_vals = list(ny["values"]) if ny else []
+    zr_on = _zr(on_vals + (ny_vals if same else []), cfg)
+    zr_ny = _zr(ny_vals + (on_vals if same else []), cfg)
+    height = max(of.map_height(), nf.map_height(ny_geo) + 90)
+    unit = "counties" if view == "County" else "regions"
+    sub = "OMAFRA county estimates on census-division boundaries" if view == "County" else "OMAFRA's five regions"
+    if is_fc:
+        sub = f"{year} forecast ({prod_kt:,.0f} kt) allocated by each county's average share of the last five years: Est"
+    elif not ov.empty and abs(ov["adj"].mean()) > on.RECONCILE_TOL:
+        sub += f" · scaled {ov['adj'].mean():+.1%} to StatCan's {on.production_kt(crop, year):,.0f} kt"
+
+    left, right = st.columns(2, gap="small")
+    with left:
+        if ov.empty:
+            st.info(f"No earlier year to compare Ontario {year} with." if change != "Current Year" else "No Ontario data for this selection.")
+        else:
+            fig = of.ontario_map(ov, metric, change, f"Ontario {crop_label} {year}: {metric}", sub,
+                                 list(on.NODE_KINDS) if plants else [], ny_geo if view == "County" else None, on_view, zr_on, height)
+            of.shrink_labels(fig, 0.72)
+            st.plotly_chart(fig, use_container_width=True, key="on_pair_map_on",
+                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+    with right:
+        if ny is None or ny.get("fig") is None:
+            st.info("No New York data for this selection." if ny is not None else "New York data is not available here.")
+        else:
+            fig = ny["fig"](zr_ny)
+            fig.update_layout(height=height, title=dict(font=dict(size=14)), dragmode=False)
+            of.shrink_labels(fig, 0.72)
+            st.plotly_chart(fig, use_container_width=True, key="on_pair_map_ny",
+                            config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
+    notes = []
+    if is_fc:
+        notes.append(f"Ontario {year}: no county data yet, so the selected provincial estimate is split by each county's olympic-average "
+                     "share of production and acres over the last five years (the NASS tab's forecast method).")
+    elif not ov.empty and abs(ov["adj"].mean()) > on.RECONCILE_TOL:
+        notes.append("Ontario county values are reconciled to OMAFRA's regional subtotals and then to StatCan's provincial total.")
+    if ny and ny.get("note"):
+        notes.append(ny["note"])
+    notes.append("Hover a county for the detail. Both maps use the same crop, year, metric and view" + (" and one colour scale." if same else "."))
+    st.caption(" ".join(notes))
+
+
+def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_geo: dict, ny_pair=None, ny_years=None) -> None:
     st.markdown(
         "<div class='callout'><strong>What might Ontario need?</strong> Ontario grows about 4 Mt of soybeans and 10 Mt of corn, "
         "but its processors, feed trade and ethanol plants use a lot of both. This page lays out Ontario's supply and use by "
@@ -84,6 +167,8 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
     prev = latest - 1
     p_latest, p_prev = on.production_kt(crop, latest), on.production_kt(crop, prev)
     st_latest = on.statcan(crop, latest)
+
+    _pair_maps(crop, crop_label, latest, p_latest, st_latest, ny_geo, ny_pair, ny_years)
 
     # ── headline numbers ──────────────────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
@@ -406,33 +491,18 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
                     "and the border alone.")
             st.markdown(msg)
 
-    # ── map ───────────────────────────────────────────────────────────────────
+    # ── county table for the paired maps' year ────────────────────────────────
     st.markdown("<hr style='border-color:#d7e2dc;margin:10px 0'>", unsafe_allow_html=True)
-    st.markdown('<div class="sh">Where it is grown, and where it is used</div>', unsafe_allow_html=True)
-    m1, m2, m3, m4 = st.columns([0.7, 1.9, 1.5, 1.8])
-    year = m1.selectbox("Year", on.county_years(crop), key="on_map_year")
-    metric = m2.radio("Map", ["Production (kt)", "Harvested acres", "Yield (bu/ac)"], horizontal=True, key="on_map_metric")
-    scale = m3.checkbox("Scale counties to the StatCan total", value=True, key="on_scale",
-                        help="Since 2023 the soybean county rows add up to 14-17% less than the province. This scales them "
-                             "up pro rata; it only changes production, not acres or yield.")
-    kinds = m4.multiselect("Show", list(on.NODE_KINDS), default=list(on.NODE_KINDS), key="on_nodes",
-                           format_func=lambda k: on.NODE_KINDS[k]["label"])
-    gap = on.county_gap(crop, year)
-    cdf = on.county_table(crop, year, scale)
-    sub = "OMAFRA county estimates on census-division boundaries"
-    if abs(gap) > on.SCALE_GAP:
-        sub += (f" · counties scaled up {gap / (1 - gap):.0%} to reach StatCan's {on.production_kt(crop, year):,.0f} kt"
-                if scale else f" · county rows are {gap:.0%} short of StatCan's provincial total")
-    fig = of.county_map(cdf, metric, f"Ontario {crop_label.lower()} {year}: {metric.lower()}", sub, kinds, ny_geo)
-    st.plotly_chart(fig, use_container_width=True, key="on_map",
-                    config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
-    st.caption("Hover a marker for the plant and what we know about it. Grey counties across the lake are New York, with the "
-               "Du Mond plants as stars. Northern Ontario is off the frame (there is almost no crop there).")
-    with st.expander("County table", expanded=False):
-        show = cdf.assign(**{"Share": (cdf["Share"] * 100).round(1)}).drop(columns=["fips"])
-        st.dataframe(show.round({"Seeded acres": 0, "Harvested acres": 0, "Yield (bu/ac)": 1, "Production (kt)": 1,
-                                 "Production (M bu)": 2}), use_container_width=True, hide_index=True,
+    tbl_year = int(st.session_state.get("on_pair_year", latest - 1))
+    tbl_fc = on.is_forecast(crop, tbl_year)
+    with st.expander(f"Ontario county table, {tbl_year}" + (" (forecast allocation)" if tbl_fc else ""), expanded=False):
+        ct = on.county_table(crop, tbl_year, float(st.session_state.get(_k(crop, "p_latest"), p_latest)) if tbl_fc else None,
+                             st_latest.get("harvested_ac") if tbl_fc else None)
+        st.dataframe(ct.assign(Share=(ct["Share"] * 100).round(1), Estimated=ct["Estimated"].map({True: "Est", False: ""}))
+                     .round({"Harvested acres": 0, "Yield (bu/ac)": 1, "Production (M bu)": 2, "Production (kt)": 1}),
+                     use_container_width=True, hide_index=True,
                      column_config={"Share": st.column_config.NumberColumn("Share of province (%)", format="%.1f")})
+        st.caption("Reconciled (or forecast) values as drawn on the map; Est marks the forecast allocation.")
 
     with st.expander("Demand nodes and what we know about them", expanded=False):
         for kind, meta in on.NODE_KINDS.items():
@@ -464,7 +534,9 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             "32-10-0383-01 ends 2024-05-27), although StatCan's own September model still uses its CCAP series internally.\n"
             "- **Vintages differ:** OMAFRA's table lists 3,840 kt for the 2025 soybean crop; StatCan's current figure is "
             f"{on.production_kt('soy', 2025):,.0f} kt. This page uses StatCan for production and OMAFRA for use.\n"
-            "- **County gap:** the soybean county rows stopped adding up after 2022; corn county rows tie to StatCan in every year. "
-            "The 2015 sheet's Ontario total row is wrong, so totals here come from StatCan.\n"
+            "- **County data:** OMAFRA's soybean tonnes column is 14-19% too low for 2023-2025 against its own bushel and yield "
+            "columns, so the maps use bushels, which tie to StatCan within about 2%. Published years are reconciled to OMAFRA's regional "
+            "subtotals and then to StatCan's provincial total; the forecast year is allocated from each county's olympic-average "
+            "share of the last five years. The 2015 sheet's Ontario total row is wrong, so totals come from StatCan.\n"
             "- **Not covered yet:** livestock feed demand by county and canola. The corn feed line in the balance already "
             "carries Ontario's feed use.")

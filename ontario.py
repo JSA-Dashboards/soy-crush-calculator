@@ -162,30 +162,21 @@ def county_years(crop: str) -> list:
 
 
 def county_gap(crop: str, year: int) -> float:
-    """Share of the StatCan provincial production the county rows miss (positive = missing)."""
+    """Share of StatCan's provincial production the published county rows miss (positive = missing). Measured in bushels: OMAFRA's
+    tonnes column for soybeans is 14-19% too low in 2023-2025 against its own bushel and yield columns, so it is not used."""
     rec = load()["county"][crop][str(year)]
     tot = production_kt(crop, year)
-    got = sum(v[4] for v in rec["counties"].values())
+    got = sum((v[3] or 0.0) for v in rec["counties"].values()) / (BU_PER_T[crop])
     return (tot - got) / tot if tot else 0.0
 
 
-def county_table(crop: str, year: int, scale: bool) -> pd.DataFrame:
-    """[fips, County, Harvested acres, Yield (bu/ac), Production (kt), Production (M bu), Share]. With `scale`, production is
-    scaled up pro rata so the counties add up to StatCan's provincial figure."""
-    rec = load()["county"][crop][str(year)]
-    names = {n: u for n, u in load_geo()["county_cd"].items()}
-    k = 1.0
-    if scale:
-        got = sum(v[4] for v in rec["counties"].values())
-        tot = production_kt(crop, year)
-        k = tot / got if got and tot else 1.0
-    rows = []
-    for name, (seeded, harv, yld, kbu, kt) in rec["counties"].items():
-        rows.append({"fips": names[name], "County": name, "Seeded acres": seeded, "Harvested acres": harv,
-                     "Yield (bu/ac)": yld, "Production (kt)": kt * k, "Production (M bu)": (kbu or 0.0) * k / 1000.0})
-    df = pd.DataFrame(rows)
-    df["Share"] = df["Production (kt)"] / df["Production (kt)"].sum() if len(df) else np.nan
-    return df.sort_values("Production (kt)", ascending=False).reset_index(drop=True)
+def county_table(crop: str, year: int, prod_kt=None, harv_ac=None) -> pd.DataFrame:
+    """Presentation table for the county detail: reconciled (or forecast) values, largest first."""
+    f = county_frame(crop, year, prod_kt, harv_ac)
+    out = pd.DataFrame({"County": f["County"], "Region": f["Region"], "Harvested acres": f["harv"], "Yield (bu/ac)": f["yield"],
+                        "Production (M bu)": f["prod_bu"] / 1e6, "Production (kt)": f["prod_bu"] / BU_PER_T[crop] / 1000.0,
+                        "Share": f["prod_bu"] / f["prod_bu"].sum(), "Estimated": f["is_estimated"]})
+    return out.sort_values("Production (M bu)", ascending=False).reset_index(drop=True)
 
 
 # ── how fresh is the crop estimate, and what does it mean historically ───────
@@ -282,3 +273,139 @@ def backcast(crop: str, production_kt: float, since: int = 2019) -> pd.DataFrame
                      "ending": r[end_key], "implied_exports": avail - r[end_key], "actual_exports": r[exp_key],
                      "carryout_same_exports": avail - r[exp_key], "actual_production": r["production"]})
     return pd.DataFrame(rows)
+
+
+# ── county map logic, modeled on the NASS Production tab ──────────────────────
+# NASS: counties NASS withholds are estimated from olympic-average shares and scaled to reconcile with the state total, the current
+# year (no county data yet) is allocated from historical shares, and the map has metric / change / district-or-county views.
+# Here: published years are reconciled to OMAFRA's regional subtotals and then to StatCan's provincial figure; the forecast year is
+# allocated from each county's olympic-average share of the last five years; regions (OMAFRA's five) stand in for ASD districts.
+METRICS = ["Production (bu)", "Harvested Acres", "Yield (bu/ac)"]
+CHANGE_OPTS = ["Current Year", "vs Prior Year", "vs Selected Year", "vs 3-Yr Avg"]
+REGIONS = ["Southern Ontario", "Western Ontario", "Central Ontario", "Eastern Ontario", "Northern Ontario"]
+RECONCILE_TOL = 0.01          # leave a total alone when it is already within this of its target
+
+
+def region_of() -> dict:
+    return load()["region_of"]
+
+
+def published_years(crop: str) -> list:
+    return sorted(int(y) for y in load()["county"][crop])
+
+
+def is_forecast(crop: str, year: int) -> bool:
+    return year not in published_years(crop)
+
+
+def _reconciled(crop: str, year: int) -> pd.DataFrame:
+    """One published year: [fips, County, Region, seeded, harv, prod_bu, adj, is_estimated]. Works in bushels (OMAFRA's tonnes column is
+    unreliable for soybeans in 2023-2025). Counties are scaled up to their regional subtotal when they fall short of it, then everything is
+    scaled to StatCan's provincial production when it is off by more than RECONCILE_TOL; `adj` is the combined factor - 1."""
+    rec = load()["county"][crop][str(year)]
+    names = load_geo()["county_cd"]
+    reg = region_of()
+    rows = []
+    for name, (seeded, harv, _yld, kbu, _kt) in rec["counties"].items():
+        rows.append({"fips": names[name], "County": name, "Region": reg.get(name, "Other"), "seeded": seeded or 0.0,
+                     "harv": harv or 0.0, "prod_bu": (kbu or 0.0) * 1000.0, "f": 1.0})
+    df = pd.DataFrame(rows)
+    for r, sub in df.groupby("Region"):
+        row = rec["regions"].get(r)
+        if row and row[3] and 0 < sub["prod_bu"].sum() < row[3] * 1000.0 * (1 - RECONCILE_TOL):
+            df.loc[sub.index, "f"] = row[3] * 1000.0 / sub["prod_bu"].sum()
+    after = (df["prod_bu"] * df["f"]).sum()
+    target = (production_kt(crop, year) or 0.0) * 1000.0 * BU_PER_T[crop]
+    if target and after > 0 and abs(target / after - 1) > RECONCILE_TOL:
+        df["f"] = df["f"] * (target / after)
+    df["prod_bu"] = df["prod_bu"] * df["f"]
+    df["adj"] = df["f"] - 1.0
+    df["is_estimated"] = False
+    return df.drop(columns=["f"])
+
+
+def _olympic(values: list) -> float:
+    v = sorted(values)
+    if len(v) >= 4:
+        v = v[1:-1]
+    return float(sum(v) / len(v)) if v else 0.0
+
+
+def shares(crop: str, year: int, n: int = 5) -> pd.DataFrame:
+    """Each county's olympic-average share of the province over the last n published years before `year`: [fips, County, Region, prod, acres]."""
+    yrs = [y for y in published_years(crop) if y < year][-n:]
+    frames = [_reconciled(crop, y) for y in yrs]
+    keys = pd.concat([f[["fips", "County", "Region"]] for f in frames]).drop_duplicates("fips")
+    out = []
+    for _, k in keys.iterrows():
+        ps, ac = [], []
+        for f in frames:
+            tp, ta = f["prod_bu"].sum(), f["harv"].sum()
+            row = f[f["fips"] == k["fips"]]
+            ps.append(float(row["prod_bu"].iloc[0]) / tp if len(row) else 0.0)
+            ac.append(float(row["harv"].iloc[0]) / ta if len(row) else 0.0)
+        out.append({**k.to_dict(), "prod": _olympic(ps), "acres": _olympic(ac)})
+    df = pd.DataFrame(out)
+    df["prod"] /= df["prod"].sum()
+    df["acres"] /= df["acres"].sum()
+    return df
+
+
+def _forecast(crop: str, year: int, prod_kt, harv_ac) -> pd.DataFrame:
+    p = prod_kt if prod_kt is not None else production_kt(crop, year)
+    a = harv_ac if harv_ac is not None else statcan(crop, year).get("harvested_ac")
+    sh = shares(crop, year)
+    df = sh[["fips", "County", "Region"]].copy()
+    df["seeded"] = 0.0
+    df["prod_bu"] = p * 1000.0 * BU_PER_T[crop] * sh["prod"]
+    df["harv"] = (a or 0.0) * sh["acres"]
+    df["adj"] = 0.0
+    df["is_estimated"] = True
+    return df
+
+
+def county_frame(crop: str, year: int, prod_kt=None, harv_ac=None) -> pd.DataFrame:
+    """County values for a year: reconciled published data, or the share-based forecast when the year has no county data."""
+    df = _forecast(crop, year, prod_kt, harv_ac) if is_forecast(crop, year) else _reconciled(crop, year)
+    df["yield"] = df["prod_bu"] / df["harv"].where(df["harv"] > 0)
+    return df
+
+
+def _unit(df: pd.DataFrame, view: str) -> pd.DataFrame:
+    """County rows as they are, or summed to OMAFRA's regions (yield = bushels / acres)."""
+    if view == "County":
+        out = df.rename(columns={"fips": "key", "County": "Name"})
+        return out[["key", "Name", "Region", "prod_bu", "harv", "yield", "adj", "is_estimated"]].copy()
+    g = df.groupby("Region").agg(prod_bu=("prod_bu", "sum"), harv=("harv", "sum"), is_estimated=("is_estimated", "any"),
+                                 adj=("adj", "mean")).reset_index()
+    g["yield"] = g["prod_bu"] / g["harv"].where(g["harv"] > 0)
+    g["key"], g["Name"] = g["Region"], g["Region"]
+    return g[["key", "Name", "Region", "prod_bu", "harv", "yield", "adj", "is_estimated"]]
+
+
+_COL = {"Production (bu)": "prod_bu", "Harvested Acres": "harv", "Yield (bu/ac)": "yield"}
+
+
+def county_view(crop: str, metric: str, year: int, change: str, comp=None, view: str = "County", prod_kt=None, harv_ac=None) -> pd.DataFrame:
+    """[key, Name, Region, Value, raw, prod_bu, harv, yield, share, is_estimated, adj]: Value is the mapped number (a % change for
+    the change views), raw the current figure, share the unit's share of the province's production."""
+    col = _COL[metric]
+    cur = _unit(county_frame(crop, year, prod_kt, harv_ac), view)
+    cur["share"] = cur["prod_bu"] / cur["prod_bu"].sum() if cur["prod_bu"].sum() else 0.0
+    cur["raw"] = cur[col]
+    if change == "Current Year":
+        cur["Value"] = cur["raw"]
+        return cur.dropna(subset=["Value"]).reset_index(drop=True)
+    if change == "vs 3-Yr Avg":
+        pool = [y for y in range(year - 3, year) if y >= 2004]
+    elif change == "vs Prior Year":
+        pool = [year - 1]
+    else:
+        pool = [comp]
+    bases = [_unit(county_frame(crop, y), view).set_index("key")[col] for y in pool if y is not None and y >= 2004]
+    if not bases:
+        return cur.iloc[0:0].assign(Value=np.nan)
+    base = pd.concat(bases, axis=1).mean(axis=1)
+    cur["base"] = cur["key"].map(base)
+    cur["Value"] = (cur["raw"] - cur["base"]) / cur["base"].where(cur["base"] > 0) * 100.0
+    return cur.dropna(subset=["Value"]).reset_index(drop=True)

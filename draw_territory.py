@@ -937,7 +937,41 @@ def _ontario_tab() -> None:
         ny_total = ny_conv = ny_year = None
     ss = st.session_state
     draw_ontario.render(ny_total, ny_conv, ny_year, float(ss.get("ny_fr_price", _NOTES_PRICE)),
-                        float(ss.get("ny_fr_tariff", 0.0)), _geo())
+                        float(ss.get("ny_fr_tariff", 0.0)), _geo(), _ny_pair, list(nd.YEARS))
+
+
+def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: str, show_comp: bool) -> dict:
+    """The New York half of the side-by-side map, built the way the NASS Production tab builds its maps: the values (so both maps can
+    share a colour range), a figure builder that takes that range, and a note. The forecast year has ASD districts only."""
+    geo = _geo()
+    cobj, _err = _get_crop(crop_label)
+    ho = float(st.session_state.get("ny_ho", 0.0)) / 100.0 if crop_label == "Soybeans" else 0.0
+    adj = nd.Adj(ho=ho, ts=False)
+    comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
+    is_fc = year == nd.FORECAST_YEAR and cobj.reported_counties(year) == 0
+    note = ""
+    if view == "County" and not is_fc:
+        cdf = cobj.county_view(metric, year, change, comp, adj)
+        if cdf is not None and not cdf.empty:
+            n_est = int(cdf["is_estimated"].sum())
+            if n_est:
+                note = f"New York: {n_est} counties NASS withholds are estimated (Est)."
+            return {"values": [v for v in cdf["Value"] if pd.notna(v)], "note": note,
+                    "fig": lambda z: nf.county_fig(cdf, geo, crop_label, year, metric, change, comp_cats, zrange=z)}
+        return {"values": [], "fig": None, "note": ""}
+    fc_stats: dict = {}
+    if is_fc:
+        src = cobj.default_yield_sources(adj)
+        y_in = float(st.session_state.get(f"ny_fc_yield_{crop_label}") or src["usda"] or src["ly"] or 0.0)
+        if y_in > 0:
+            fc_stats, _ = cobj.asd_forecast(y_in, adj)
+        note = (f"New York {year}: county estimates come after harvest, so this shows the NASS ag districts from the forecast yield "
+                f"({y_in:g} bu/ac, set on the NASS Production tab).")
+    view_df, cur_df, est_d = cobj.district_view(metric, year, change, comp, adj, fc_stats if is_fc else None)
+    if view_df is None or view_df.empty:
+        return {"values": [], "fig": None, "note": note}
+    return {"values": [v for v in view_df["Value"] if pd.notna(v)], "note": note,
+            "fig": lambda z: nf.district_fig(view_df, cur_df, geo, crop_label, year, metric, change, est_d, comp_cats, zrange=z)}
 
 
 # ── livestock: Census county / ASD view, then the annual state survey ─────────

@@ -287,7 +287,7 @@ def add_competition(fig, geo: dict, cats=None) -> int:
 
 # ── maps ──────────────────────────────────────────────────────────────────────
 def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None,
-               src: str = "NASS"):
+               src: str = "NASS", zrange: tuple | None = None):
     """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
     if df is None or df.empty:
         return None
@@ -305,7 +305,7 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
         lbl = name.get(f) or next((x["properties"]["NAME"] for x in counties["features"] if x["id"] == f), f)
         sfx = " (Est)" if est.get(f) else ""
         hover.append(f"{lbl}{sfx}: {cfg.get('hover_fn', cfg['label_fn'])(v)}{cfg['hover_sfx']}" if v else f"{lbl}: No data")
-    z_min, z_max = _z_range(cfg, [v for v in z if v is not None])
+    z_min, z_max = zrange or _z_range(cfg, [v for v in z if v is not None])
     line = dict(color="#8fa6bb", width=1.1)
     fig = go.Figure()
     fig.add_trace(go.Choropleth(geojson=counties, featureidkey="id", locations=all_fips, z=[0] * len(all_fips),
@@ -345,7 +345,8 @@ def _exteriors(geom):
 
 
 def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: str, year: int,
-                 metric: str, change_view: str, est_districts: set, competition=None, src: str = "NASS"):
+                 metric: str, change_view: str, est_districts: set, competition=None, src: str = "NASS",
+                 zrange: tuple | None = None):
     """Counties coloured by ASD district value, bold district boundaries, name + value labels."""
     if view_df is None or view_df.empty:
         return None
@@ -371,6 +372,8 @@ def district_fig(view_df: pd.DataFrame, raw_df: pd.DataFrame, geo: dict, crop: s
         z_min, z_max = -m, m
     else:
         z_min, z_max = 0, (max(pos) if pos else 1)
+    if zrange:
+        z_min, z_max = zrange
     fig = go.Figure()
     fig.add_trace(go.Choropleth(
         geojson=geo["districts"], featureidkey="properties.District", locations=districts, z=z,
