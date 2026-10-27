@@ -714,7 +714,8 @@ def _freight_tab() -> None:
     st.markdown(
         "<div class='callout'><strong>Where does each county's soybean go, and what does it cost to get it there?</strong> "
         "Road miles from each county to the Du Mond plants, Bunge Hamilton (Canada), DeLong's Oswego export terminal and "
-        "Perdue's Pennsylvania plants, turned into a delivered cost (truck + border + Canada's surtax) and, once you enter "
+        "Perdue's Pennsylvania plants, turned into a delivered cost (truck + border, plus Canada's surtax if you switch one on: "
+        "US soybeans are not on the surtax list that took effect September 8, 2026) and, once you enter "
         "what each buyer bids, a net-back to the farm gate and the territory each buyer can draw.</div>",
         unsafe_allow_html=True)
 
@@ -722,12 +723,14 @@ def _freight_tab() -> None:
     a1.radio("Freight assumptions", list(nfr.PRESETS), horizontal=True, key="ny_fr_preset", on_change=_fr_apply_preset,
              help="Benchmark trucking uses current truck rates (roughly $4-5 per loaded mile). 'Your notes' uses the "
                   "0.02 cents per bushel-mile behind the 3 cents for 152 miles in the research notes, with no border costs.")
-    tariff = a2.selectbox("Canada surtax on US soybeans", nfr.TARIFF_CHOICES, index=2, key="ny_fr_tariff",
-                          format_func=lambda v: f"{v:.0%}", help="Notes: 15, 25 or 50% on listed US goods as of 2026-09-08; "
-                                                                "soybeans are on the list at 25% in most categories.")
-    a3.number_input("Soybean price for the surtax ($/bu)", min_value=0.0, max_value=40.0, step=0.05, format="%.2f",
-                    key="ny_fr_price", help="Customs value = this futures price plus Hamilton's bid. Defaults to the "
-                                            f"live front-month ZS (${live_price:.2f}); the notes' $2.62 surtax is 25% of $10.48.")
+    tariff = a2.selectbox("Canada surtax on US soybeans (what-if)", nfr.TARIFF_CHOICES, index=0, key="ny_fr_tariff",
+                          format_func=lambda v: f"{v:.0%}", help="Soybeans are NOT on the United States Surtax Order (2026) "
+                                                                "schedules (15%, 25% and 50% lists, 335 tariff items, none in "
+                                                                "chapter 12), so the default is 0%. Checked 2026-10-27 against the "
+                                                                "order's text. Pick 15, 25 or 50% to see what a surtax would do.")
+    a3.number_input("Soybean price for a surtax what-if ($/bu)", min_value=0.0, max_value=40.0, step=0.05, format="%.2f",
+                    key="ny_fr_price", help="Customs value = this futures price plus Hamilton's bid; only matters if you switch a "
+                                            f"surtax on. Defaults to the live front-month ZS (${live_price:.2f}).")
     with st.expander("Freight and border assumptions", expanded=False):
         f1, f2, f3, f4, f5 = st.columns(5)
         f1.number_input("Truck rate ($/loaded mile)", 0.0, 20.0, step=0.05, format="%.2f", key="ny_fr_rate")
@@ -856,7 +859,7 @@ def _freight_tab() -> None:
                + "). With every bid at 0, a buyer 'wins' a county only on freight.")
 
     # ── surtax sensitivity ────────────────────────────────────────────────────
-    st.markdown('<div class="sh">Surtax sensitivity (selected origin)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">Surtax what-if (selected origin; soybeans are not on the list today)</div>', unsafe_allow_html=True)
     base_cost = ham["haul_c"] + ham["border_c"]
     prices = [price * 0.8, price, price * 1.2]
     grid = pd.DataFrame(
@@ -879,6 +882,9 @@ def _freight_tab() -> None:
         bsen = bench[bench["County"] == "Seneca"].set_index("key")
         nsen = nfr.lane_table(nfr.NOTES, float(tariff), _NOTES_PRICE, {})
         nsen = nsen[nsen["County"] == "Seneca"].set_index("key")
+        b0 = nfr.lane_table(nfr.BENCHMARK, 0.0, price, bids)
+        b0 = b0[b0["County"] == "Seneca"].set_index("key")
+        adv0 = b0.loc["hamilton", "cost_c"] - b0.loc["union_springs", "cost_c"]
         rows = [
             ("Seneca to Hamilton, miles", "~152", f"{mi('Seneca', 'hamilton'):.0f}", "County centre point, by road"),
             ("Seneca to Union Springs, miles", "~11", f"{mi('Seneca', 'union_springs'):.0f}",
@@ -887,7 +893,8 @@ def _freight_tab() -> None:
             ("Freight to Hamilton", "~3¢", f"{_cd(sen.loc['hamilton', 'haul_c'] + sen.loc['hamilton', 'border_c'])}",
              f"Notes preset gives {_cd(nsen.loc['hamilton', 'haul_c'])}; benchmark trucking with border costs gives "
              f"{_cd(bsen.loc['hamilton', 'haul_c'] + bsen.loc['hamilton', 'border_c'])}"),
-            ("Surtax at 25%", "$2.62", f"${price * 0.25:.2f}", f"Notes imply a ${_NOTES_PRICE:.2f} bean; yours is ${price:.2f}"),
+            ("Surtax on soybeans", "$2.62 (25% of $10.48)", _cd(sen.loc["hamilton", "surtax_c"]),
+             "Soybeans are not on Canada's 2026 surtax schedules, so this is 0 unless you switch a what-if on"),
             ("All-in cost to Hamilton", "$2.66", _cd(sen.loc["hamilton", "cost_c"]), "Haul + border + surtax"),
             ("In-state advantage", "$2.63", _cd(sen.loc["hamilton", "cost_c"] - sen.loc["union_springs", "cost_c"]),
              "Hamilton cost minus Union Springs cost"),
@@ -901,9 +908,12 @@ def _freight_tab() -> None:
             f"'twenty cents per bushel-mile', which would be $30 a bushel, so that is probably a mis-transcription. At "
             f"roughly $4-5 per loaded mile (USDA AMS truck-rate benchmarks) a 152-mile haul costs about {_cd(hd)} per bushel "
             f"in New York and about {_cd(hb)} to Hamilton with the border and empty backhaul, 20-40 times the notes' figure.\n"
-            f"- **The conclusion survives.** The surtax is a percentage of the price, so it still dominates "
-            f"(${price * 0.25:.2f} at today's beans), and in-state still wins by well over $2. The freight correction matters "
-            f"for the lanes with no surtax: Union Springs vs York vs Oswego vs Perdue, and which counties each can reach.\n"
+            f"- **The premise behind the $2.63 does not hold for soybeans.** Canada's United States Surtax Order (2026) lists 335 "
+            f"tariff items (15%: 21, 25%: 172, 50%: 142): dairy, molasses and syrups, doughs and mixes, steel, machinery, "
+            f"apparel and the like. None is in chapter 12, so US soybeans (1201) pay no surtax; the March 2025 order was "
+            f"repealed on September 1, 2025. Checked against the order's text on 2026-10-27. Without it the in-state advantage "
+            f"to Hamilton is the freight and border difference alone, about {_cd(adv0)} a bushel for Seneca County at "
+            f"benchmark trucking, not $2.63. The surtax rows above are a what-if.\n"
             f"- **Mileage:** I measure from each county's centre point, so a county's lanes can differ from a town-to-plant "
             f"figure by 15 miles or more.\n- **Surtax base:** modeled on the futures price plus Hamilton's bid, the customs "
             f"value for goods sold into Canada.")
@@ -927,7 +937,7 @@ def _ontario_tab() -> None:
         ny_total = ny_conv = ny_year = None
     ss = st.session_state
     draw_ontario.render(ny_total, ny_conv, ny_year, float(ss.get("ny_fr_price", _NOTES_PRICE)),
-                        float(ss.get("ny_fr_tariff", 0.25)), _geo())
+                        float(ss.get("ny_fr_tariff", 0.0)), _geo())
 
 
 # ── livestock: Census county / ASD view, then the annual state survey ─────────

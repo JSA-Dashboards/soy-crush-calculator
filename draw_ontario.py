@@ -73,7 +73,8 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
         "<div class='callout'><strong>What might Ontario need?</strong> Ontario grows about 4 Mt of soybeans and 10 Mt of corn, "
         "but its processors, feed trade and ethanol plants use a lot of both. This page lays out Ontario's supply and use by "
         "crop year, runs a two-year balance with the assumptions you can change, and sets any shortfall against New York's "
-        "crop and Canada's surtax. Data: Statistics Canada and OMAFRA, both open.</div>", unsafe_allow_html=True)
+        "crop and the freight lane to Hamilton. Data: Statistics Canada, OMAFRA, NOAA and the US Census, all open.</div>",
+        unsafe_allow_html=True)
 
     crop_label = st.radio("Crop", list(on.CROPS), horizontal=True, key="on_crop")
     crop = on.CROPS[crop_label]
@@ -260,7 +261,8 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             "crop covers its crushers, and imports rise only if processing runs harder. OMAFRA's table has no import line, so typical "
             "imports are probably already inside its processing history and only a change from typical would move the balance. "
             "Census publishes September "
-            "around November 5, the first month after the surtax your notes date to September 8.")
+            "around November 5, the first month after Canada's September 8 counter-tariffs. Soybeans are not on that list, so "
+            "September is a plain read on demand, not a tariff test.")
         st.caption(f"Census Bureau exports to Canada, HS 1201900005 + 1201900095, by customs district of exit, through {ot.month_label(lm)}. "
                    "Detroit, Buffalo and Cleveland are treated as the Ontario gateways (88% to 99% of the total; Ogdensburg and Pembina "
                    "excluded). Shipments are dated at US exit, not arrival, and the crop year runs September to August, one month off "
@@ -382,9 +384,11 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
                       f"{ny_conv_bu / 1e6:,.1f}M bu conventional pool", delta_color="off", delta_arrow="off",
                       help="NASS production; the conventional pool is the High-Oleic tab's model.")
         sur = price_usd * tariff * 100
-        n4.metric("Surtax on US beans", f"{sur:,.0f}¢/bu", f"{tariff:.0%} on ${price_usd:.2f}", delta_color="off",
-                  delta_arrow="off", help="Settings from the Freight & Spreads tab. Your notes put soybeans on the surtax list "
-                                          "at 25%; I have not confirmed it applies to beans bought for crushing.")
+        n4.metric("Canada surtax on US beans", "None" if not tariff else f"{sur:,.0f}¢/bu (what-if)",
+                  "not on the Sep 8, 2026 list" if not tariff else f"{tariff:.0%} on ${price_usd:.2f}", delta_color="off",
+                  delta_arrow="off", help="Checked 2026-10-27 against the United States Surtax Order (2026): its 335 tariff items "
+                                          "(15%, 25%, 50%) include dairy, molasses, doughs, steel and machinery but nothing in chapter "
+                                          "12, so US soybeans (1201) pay no surtax. A what-if from the Freight & Spreads tab shows here.")
         if ny_soy_bu:
             ex_bu = on.to_mbu(crop, a["exports"]) * 1e6
             msg = (f"Ontario's typical exports alone are **{ex_bu / ny_soy_bu:.1f}x** New York's whole soybean crop, and each "
@@ -398,7 +402,8 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
                     f"{imp_bu / ny_soy_bu:.0%} of New York's whole crop"
                     + (f" and {imp_bu / ny_conv_bu:.1f}x its conventional pool" if ny_conv_bu else "")
                     + ", and Buffalo is one of the two main gateways, so New York beans are relevant to that flow. The Midwest "
-                    "still supplies most of it, and the surtax is what separates a US bean from an Ontario one.")
+                    "still supplies most of it. With no surtax on soybeans, a US bean competes with an Ontario one on price, freight "
+                    "and the border alone.")
             st.markdown(msg)
 
     # ── map ───────────────────────────────────────────────────────────────────

@@ -18,7 +18,8 @@ BENCHMARK = {"rate": 4.25, "bu_load": 833.0, "min_load": 150.0, "xb_mult": 1.30,
 NOTES = {"rate": 0.17, "bu_load": 833.0, "min_load": 0.0, "xb_mult": 1.0, "border": 0.0}
 PRESETS = {"Benchmark trucking": BENCHMARK, "Your notes (0.02 c/bu-mile)": NOTES}
 
-TARIFF_CHOICES = [0.0, 0.15, 0.25, 0.50]      # Canada's surtax tiers on US goods (15 / 25 / 50%); soybeans sit at 25%
+TARIFF_CHOICES = [0.0, 0.15, 0.25, 0.50]      # Canada's surtax tiers on US goods (15 / 25 / 50%). Soybeans are NOT on the
+                                              # 2026 schedules (checked 2026-10-27), so 0% is the real-world default.
 DEST_COLORS = {"union_springs": "#d97706", "york": "#16a34a", "hamilton": "#dc2626", "oswego": "#2563eb",
                "perdue_bainbridge": "#7c3aed", "perdue_lancaster": "#0d9488"}
 
