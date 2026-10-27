@@ -289,21 +289,17 @@ def add_competition(fig, geo: dict, cats=None) -> int:
 
 
 def add_ethanol(fig) -> None:
-    """New York's corn-ethanol plants: a solid marker for a running plant, a hollow one (own legend entry) for an idle plant. The
-    running marker shares a legend group with Ontario's ethanol plants on the combined map."""
+    """New York's corn-ethanol plant. It shares a legend group with Ontario's ethanol plants on the combined map."""
     sty = ny_ho.ETHANOL_STYLE
-    for idle in (False, True):
-        pts = [p for p in ny_ho.ETHANOL_PLANTS if (p.get("status") == "idle") == idle]
-        if not pts:
-            continue
-        hover = [f"<b>{p['name']}</b>" + ("<br><i>Idle</i>" if idle else "") + f"<br>{p['town']}<br>{_wrap(p['cap'])}"
-                 + (f"<br>{_wrap(p['note'])}" if p["note"] else "") + f"<br><i>Confidence in this entry: {p['conf']}</i>" for p in pts]
-        fig.add_trace(go.Scattergeo(
-            lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers",
-            name=sty["label"] + (", idle" if idle else ""), legendgroup="ethanol_idle" if idle else "ethanol",
-            marker=dict(symbol=sty["symbol"] + ("-open" if idle else ""), size=sty["size"], color=sty["color"],
-                        line=dict(color=sty["color"] if idle else "white", width=3 if idle else 1.4)),
-            text=hover, hovertemplate="%{text}<extra></extra>", showlegend=True))
+    pts = ny_ho.ETHANOL_PLANTS
+    if not pts:
+        return
+    hover = [f"<b>{p['name']}</b><br>{p['town']}<br>{_wrap(p['cap'])}" + (f"<br>{_wrap(p['note'])}" if p["note"] else "")
+             + f"<br><i>Confidence in this entry: {p['conf']}</i>" for p in pts]
+    fig.add_trace(go.Scattergeo(
+        lon=[p["lon"] for p in pts], lat=[p["lat"] for p in pts], mode="markers", name=sty["label"], legendgroup="ethanol",
+        marker=dict(symbol=sty["symbol"], size=sty["size"], color=sty["color"], line=dict(color="white", width=1.4)),
+        text=hover, hovertemplate="%{text}<extra></extra>", showlegend=True))
 
 
 # ── maps ──────────────────────────────────────────────────────────────────────

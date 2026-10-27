@@ -41,6 +41,7 @@ NODE_KINDS = {
     "ethanol": ny_ho.ETHANOL_STYLE,                       # one marker for Ontario's plants and New York's
     "ny": {"label": "Du Mond Grain plant", "color": "#fbbf24", "symbol": "star", "size": 22},
 }
+NODE_CROPS = {"soy": ["crush"], "corn": ["ethanol"]}      # which Ontario plants show for each crop
 NODES = [
     dict(name="Bunge - Hamilton", kind="crush", town="Hamilton", lat=43.2702, lon=-79.8495, conf="medium",
          cap="Your notes: ~3,000 t/day, soy or canola. USDA FAS has listed ~1.05 Mt/yr canola + soy (older table); "

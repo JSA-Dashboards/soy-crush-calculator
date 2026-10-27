@@ -269,15 +269,17 @@ def _nass_tab() -> None:
     mv1, mv2, mv3 = st.columns([1, 1.7, 1.1])
     mv1.radio("Map View", ["ASD District", "County"], horizontal=True, key="ny_map_view")
     map_view = st.session_state["ny_map_view"]
+    mk = ny_ho.markers_for(crop)                           # the markers follow the crop: beans and corn each get their own set
     with mv2:
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        show_comp = st.checkbox("Show competition on the map (roasters, mills, dealers, crushers)", key="ny_comp_nass")
+        show_comp = st.checkbox(f"Show competition on the map ({mk['comp_label']})", key="ny_comp_nass")
     with mv3:
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        show_eth = st.checkbox("Show ethanol plants", value=True, key="ny_ethanol_nass",
-                               help="New York's two corn-ethanol plants: Western New York Energy at Medina (running) and the "
-                                    "Fulton plant (idle, hollow marker).")
-    comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
+        show_eth = st.checkbox("Show ethanol plants" + ("" if mk["ethanol"] else " (corn only)"), value=True, key="ny_ethanol_nass",
+                               disabled=not mk["ethanol"],
+                               help="New York's corn-ethanol plant, Western New York Energy at Medina. Shown for corn only.")
+    show_eth = show_eth and mk["ethanol"]
+    comp_cats = mk["cats"] if show_comp and mk["cats"] else None
 
     if map_view == "ASD District":
         view_df, cur_df, est_d = cobj.district_view(metric, year, change, comp, adj, fc_stats if is_fc else None)
@@ -953,7 +955,9 @@ def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: s
     cobj, _err = _get_crop(crop_label)
     ho = float(st.session_state.get("ny_ho", 0.0)) / 100.0 if crop_label == "Soybeans" else 0.0
     adj = nd.Adj(ho=ho, ts=False)
-    comp_cats = list(ny_ho.CATEGORIES) if show_comp else None
+    mk = ny_ho.markers_for(crop_label)                     # beans and corn each get their own markers
+    comp_cats = mk["cats"] if show_comp and mk["cats"] else None
+    show_eth = show_comp and mk["ethanol"]
     is_fc = year == nd.FORECAST_YEAR and cobj.reported_counties(year) == 0
     note = ""
     if view == "County" and not is_fc:
@@ -964,7 +968,7 @@ def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: s
                 note = f"New York: {n_est} counties NASS withholds are estimated (Est)."
             return {"values": [v for v in cdf["Value"] if pd.notna(v)], "note": note, "unit": "NASS counties",
                     "fig": lambda z: nf.county_fig(cdf, geo, crop_label, year, metric, change, comp_cats, zrange=z,
-                                                   ethanol=show_comp)}
+                                                   ethanol=show_eth)}
         return {"values": [], "fig": None, "note": ""}
     fc_stats: dict = {}
     if is_fc:
@@ -979,7 +983,7 @@ def _ny_pair(crop_label: str, year: int, metric: str, change: str, comp, view: s
         return {"values": [], "fig": None, "note": note}
     return {"values": [v for v in view_df["Value"] if pd.notna(v)], "note": note, "unit": "NASS ag districts",
             "fig": lambda z: nf.district_fig(view_df, cur_df, geo, crop_label, year, metric, change, est_d, comp_cats, zrange=z,
-                                             ethanol=show_comp)}
+                                             ethanol=show_eth)}
 
 
 # ── livestock: Census county / ASD view, then the annual state survey ─────────

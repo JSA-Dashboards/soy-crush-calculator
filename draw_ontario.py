@@ -97,8 +97,10 @@ def _one_map(crop: str, crop_label: str, latest: int, p_latest: float, st_latest
     d1, d2 = st.columns([1.5, 4.5])
     view = d1.radio("Map view", ["County", "District"], horizontal=True, key="on_pair_view",
                     help="District = OMAFRA's five regions for Ontario and the NASS ag districts for New York.")
-    plants = d2.checkbox("Show plants and competitors (crushers, ethanol plants, Du Mond, NY roasters and mills)", value=True,
-                         key="on_pair_plants")
+    plants = d2.checkbox(f"Show plants and competitors for {crop_label.lower()} ({ny_ho.markers_for(crop_label)['label']}, Du Mond)",
+                         value=True, key="on_pair_plants",
+                         help="Soybeans: crushers, roasters and elevators. Corn: elevators, feed mills and ethanol plants. Ontario's "
+                              "list has crushers and ethanol plants only.")
 
     is_fc = on.is_forecast(crop, year)
     prod_kt = float(st.session_state.get(_k(crop, "p_latest"), p_latest))
@@ -119,7 +121,7 @@ def _one_map(crop: str, crop_label: str, latest: int, p_latest: float, st_latest
     has_ny = bool(ny and ny.get("fig") is not None)
     sub = f"Ontario: {on_sub}" + (f"  ·  New York: {ny['unit']}" if has_ny else "")
     view_label = metric if change == "Current Year" else f"{change} — {metric}"
-    kinds = [k for k in on.NODE_KINDS if k != "ny"] if plants else []      # the New York map already draws the Du Mond plants
+    kinds = on.NODE_CROPS[crop] if plants else []          # Ontario's crushers for beans, its ethanol plants for corn
 
     base = ny["fig"](zr) if has_ny else None
     if ov.empty:
@@ -505,12 +507,11 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             if not items:
                 continue
             st.markdown(f"<span style='color:{meta['color']};font-weight:700;'>● {meta['label']}</span>", unsafe_allow_html=True)
-            st.markdown("\n".join(f"- **{n['name']}** — {n['town']}" + (" — **idle**" if n.get("status") == "idle" else "")
-                                  + f" *({_CONF_TXT[n['conf']]})*  \n  {n['cap']}" + (f" {n['note']}" if n["note"] else "")
-                                  for n in items))
+            st.markdown("\n".join(f"- **{n['name']}** — {n['town']} *({_CONF_TXT[n['conf']]})*  \n  {n['cap']}"
+                                  + (f" {n['note']}" if n["note"] else "") for n in items))
         st.caption("Capacity figures come from dated trade reports and company releases; confirm with the plants or the "
                    "Canadian Oilseed Processors Association before relying on them. Most Ontario markers sit at the town, "
-                   "not the plant gate; the two New York ethanol plants are placed at their sites.")
+                   "not the plant gate; the New York ethanol plant is placed at its site.")
 
     with st.expander("Data notes", expanded=False):
         st.markdown(

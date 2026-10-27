@@ -97,8 +97,9 @@ COMPETITORS = [
          note="Lists roasted soybeans on its dealer licence. Not on the map."),
 ]
 
-# New York's two corn-ethanol plants, checked 2026-10-27 (EIA, RFA, local news). Drawn on the NASS maps and on the Ontario + New York
-# map, and shares its marker with Ontario's ethanol plants. status="idle" draws a hollow marker. conf = how well the entry is sourced.
+# New York's running corn-ethanol plant, checked 2026-10-27 (EIA, RFA, local news). Drawn on the NASS maps and on the Ontario + New
+# York map, and shares its marker with Ontario's ethanol plants. The idle Fulton plant (Volney, Oswego Co.) is left off at Kolten's
+# request; see the reference-ny-ethanol-plants memory for its history. conf = how well the entry is sourced.
 ETHANOL_STYLE = {"label": "Ethanol plant (corn)", "color": "#ea580c", "symbol": "diamond", "size": 17}
 ETHANOL_PLANTS = [
     dict(name="Western New York Energy - Medina", town="Medina (Orleans Co., NY)", lat=43.2112, lon=-78.3661, conf="high",
@@ -106,13 +107,23 @@ ETHANOL_PLANTS = [
              "(our arithmetic); runs about 30% over its 50 million gal design. The RFA (Oct 2025) calls it New York's "
              "only large-scale plant. Also makes high-purity alcohol after a $38 million expansion.",
          note="The in-state outlet for New York corn."),
-    dict(name="Fulton ethanol plant (ex-Sunoco, Attis)", town="Volney, south of Fulton (Oswego Co., NY)", lat=43.2990, lon=-76.3801,
-         conf="medium", status="idle",
-         cap="85-100 million gal/yr nameplate (sources differ). Built by Northeast Biofuels in 2008, bought by Sunoco in 2009 and "
-             "restarted in 2010, sold to Attis in 2019. Idle since Attis failed to run it; Oswego County took the site and sold it "
-             "at auction in July 2025 (one local report: $4.9 million).",
-         note="No restart found in the coverage checked."),
 ]
+
+# Which markers belong to which crop (Kolten, 2026-10-27): beans see crushers, roasters and elevators; corn sees elevators, feed mills
+# and ethanol plants. Roaster-equipment makers and licensed dealers are in neither list, and the Du Mond stars always draw.
+# comp_label names the competition layer alone; label adds the ethanol plants, which have their own switch on the NASS tab.
+CROP_MARKERS = {
+    "Soybeans": {"cats": ["commercial", "onfarm", "crush", "elevator"], "ethanol": False,
+                 "comp_label": "crushers, roasters, elevators", "label": "crushers, roasters, elevators"},
+    "Corn": {"cats": ["feedmill", "elevator"], "ethanol": True,
+             "comp_label": "elevators, feed mills", "label": "elevators, feed mills, ethanol plants"},
+}
+
+
+def markers_for(crop_label: str) -> dict:
+    """Competition categories (in legend order), whether the ethanol plants show, and the labels, for one crop."""
+    m = CROP_MARKERS.get(crop_label, {"cats": [], "ethanol": False, "comp_label": "none for this crop", "label": "none for this crop"})
+    return {**m, "cats": [k for k in CATEGORIES if k in m["cats"]]}
 
 # Milk cows by county, January 2023 (head), as given in the notes. Counties not listed are treated as 0
 # in the score (e.g. Oswego, Otsego, Yates, Warren were not in the list); Suffolk and Westchester withheld.
