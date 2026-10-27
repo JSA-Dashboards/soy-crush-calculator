@@ -153,3 +153,58 @@ def tour_chart(crop: str) -> go.Figure:
                       xaxis=dict(tickvals=list(t["year"]), gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)),
                       yaxis=dict(gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED), rangemode="tozero"))
     return fig
+
+
+# ── satellite crop condition (NOAA STAR) ──────────────────────────────────────
+def vh_chart(vh: pd.DataFrame, col: str, year: int) -> go.Figure:
+    """One index by week for `year` and the two before it, over the min-max band and average of all earlier years."""
+    import ontario_vh as ovh
+    m = ovh.matrix(vh, col)
+    weeks = [w for w in m.index if 14 <= w <= 44]
+    hist = m[[y for y in m.columns if y < year]].loc[weeks]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=weeks, y=hist.max(axis=1), mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=weeks, y=hist.min(axis=1), mode="lines", line=dict(width=0), fill="tonexty",
+                             fillcolor="rgba(94,113,100,0.18)", name=f"Range {hist.columns.min()}-{hist.columns.max()}", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=weeks, y=hist.mean(axis=1), mode="lines", name="Average", line=dict(color="#32373c", width=2),
+                             hovertemplate="Average: %{y:.3f}<extra></extra>" if col == "SMN" else "Average: %{y:.1f}<extra></extra>"))
+    for yr, color, width, dash in ((year - 2, "#9ca3af", 1.6, "dash"), (year - 1, "#f59e0b", 2.0, "solid"), (year, "#0693e3", 3.2, "solid")):
+        if yr in m.columns:
+            s = m[yr].loc[weeks].where(lambda v: v.index <= vh[vh["year"] == yr]["week"].max())
+            fig.add_trace(go.Scatter(x=weeks, y=s, mode="lines", name=str(yr), line=dict(color=color, width=width, dash=dash),
+                                     hovertemplate=f"{yr}: " + ("%{y:.3f}" if col == "SMN" else "%{y:.1f}") + "<extra></extra>"))
+    ticks = [14, 18, 23, 27, 31, 36, 40, 44]
+    fig.update_layout(height=400, paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE, font=dict(color=nf.TEXT, family="Arial"),
+                      margin=dict(l=60, r=20, t=50, b=90), hovermode="x unified",
+                      title=dict(text=f"Ontario cropland, weekly {ovh.LABEL[col]}", font=dict(size=14, color=nf.ACCENT)),
+                      legend=dict(orientation="h", y=-0.2, x=0.5, xanchor="center", yanchor="top", font=dict(size=11)),
+                      xaxis=dict(tickvals=ticks, ticktext=[ovh.week_start(year, w).strftime("%b %d") for w in ticks],
+                                 gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)),
+                      yaxis=dict(gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)))
+    return fig
+
+
+def vh_scatter(m: dict, crop: str, year: int) -> go.Figure:
+    """Yield above or below trend against the crop-window NDVI, one dot a year, with this year's reading marked."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=m["x"], y=m["anomaly"], mode="markers+text", text=[str(y) if y >= 2010 or abs(a) > 8 else "" for y, a in
+                                                                                  zip(m["years"], m["anomaly"])],
+                             textposition="top center", textfont=dict(size=9, color=nf.MUTED), marker=dict(size=8, color="#5e7164"),
+                             hovertemplate="%{customdata}: NDVI %{x:.3f}, %{y:+.1f} bu/ac vs trend<extra></extra>",
+                             customdata=m["years"], name="Years"))
+    xs = [min(m["x"]), max(m["x"])]
+    b = np_polyfit(m["x"], m["anomaly"])
+    fig.add_trace(go.Scatter(x=xs, y=[b[0] * x + b[1] for x in xs], mode="lines", line=dict(color="#d97706", dash="dash"), name="Fit"))
+    if m["x_now"] is not None:
+        fig.add_vline(x=m["x_now"], line_color="#0693e3", line_width=2.5, annotation_text=f"{year}", annotation_font=dict(color="#0693e3"))
+    fig.update_layout(height=360, paper_bgcolor=nf.DARK, plot_bgcolor=nf.SURFACE, font=dict(color=nf.TEXT, family="Arial"),
+                      margin=dict(l=60, r=20, t=50, b=50), showlegend=False,
+                      title=dict(text=f"{crop} yield vs trend against the crop-window NDVI", font=dict(size=14, color=nf.ACCENT)),
+                      xaxis=dict(title="Mean NDVI over the crop window", gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED)),
+                      yaxis=dict(title="Yield minus trend (bu/ac)", gridcolor=nf.BORDER, tickfont=dict(color=nf.MUTED), zeroline=True))
+    return fig
+
+
+def np_polyfit(x, y):
+    import numpy as np
+    return np.polyfit(np.asarray(x, dtype=float), np.asarray(y, dtype=float), 1)

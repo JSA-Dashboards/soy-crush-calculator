@@ -3,11 +3,15 @@
 The question behind this page is demand: does Ontario have enough soybeans (or corn) for its own processors, and how big
 could its call on outside beans be compared with New York's crop? Logic is in ontario.py, figures in ontario_figs.py.
 """
+import time
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 import ontario as on
 import ontario_figs as of
+import ontario_vh as ovh
 
 _SOY_TIP = ("Ontario's own processing ('milling' in OMAFRA's table) has run about 3 Mt a year since 2019/20 and exports "
             "another 1.1-1.3 Mt, so a short crop is felt in exports first and then in imports.")
@@ -28,6 +32,33 @@ def _k(crop: str, name: str) -> str:
 
 def _ord(n: int) -> str:
     return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _vh_live() -> pd.DataFrame:
+    return ovh.fetch()
+
+
+@st.cache_resource(show_spinner=False)
+def _vh_backoff() -> dict:
+    return {"until": 0.0, "error": ""}
+
+
+def _vh() -> tuple:
+    """(weekly series, error). The live NOAA series when reachable; otherwise the bundled copy and the reason. After a
+    failure the live call is not retried for ten minutes, so an outage cannot slow every interaction."""
+    state = _vh_backoff()
+    if time.time() < state["until"]:
+        return ovh.snapshot(), state["error"]
+    try:
+        return _vh_live(), None
+    except Exception as e:
+        state.update(until=time.time() + 600, error=f"{type(e).__name__}: {str(e)[:140]}")
+        return ovh.snapshot(), state["error"]
+
+
+def _set_production(crop: str, kt: float) -> None:
+    st.session_state[_k(crop, "p_latest")] = float(round(kt))
 
 
 def _apply_estimate(crop: str) -> None:
@@ -132,6 +163,71 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
                 f"**{_ord(ri['rank'])} largest of {ri['of']}** since 1990: {ri['vs_avg5']:+.1%} on the last five years' average and "
                 f"{ri['vs_avg10']:+.1%} on the ten-year average. The record is {ri['max_year']}'s {ri['max_kt']:,.0f} kt."
                 + (f" The implied yield is {yld_sel:.1f} bu/ac against {avg_yld:.1f} over the last five years." if yld_sel else ""))
+
+    # ── satellite crop condition ──────────────────────────────────────────────
+    st.markdown('<div class="sh">Satellite crop condition</div>', unsafe_allow_html=True)
+    vh, vh_err = _vh()
+    vy, vw = ovh.last_week(vh)
+    if vh_err:
+        st.warning(f"NOAA's service could not be reached, so this shows the bundled copy through week {vw} of {vy}.  \n`{vh_err}`",
+                   icon="⚠️")
+    st.caption(f"NOAA STAR Vegetation Health, Ontario cropland only, weekly, through week {vw} of {vy} (about "
+               f"{ovh.week_start(vy, vw):%b %d}). Statistics Canada's own weekly NDVI table (CCAP) stopped in May 2024, so this is the "
+               "nearest current series. A province-wide average, not a county or field measure; NOAA labels it experimental.")
+    vh_col = st.radio("Index", ["SMN", "VCI", "VHI", "TCI"], horizontal=True, key="on_vh_metric", format_func=lambda c: ovh.LABEL[c])
+    st.plotly_chart(of.vh_chart(vh, vh_col, vy), use_container_width=True, key="on_vh_chart", config={"displayModeBar": False})
+
+    wa, wb = ovh.WINDOWS[crop]
+    season = ovh.season_table(vh, crop, vy)
+    if not season.empty:
+        end = ovh.week_start(vy, wb) + pd.Timedelta(days=6)
+        st.markdown(f"**{noun.capitalize()} crop window: weeks {wa} to {wb} (about {ovh.week_start(vy, wa):%b %d} to {end:%b %d})**")
+
+        def fmt(col, v):
+            return f"{v:.3f}" if col == "SMN" else f"{v:.1f}"
+        st.dataframe(pd.DataFrame({
+            "Index": [ovh.LABEL[c] for c in season["index"]],
+            str(vy): [fmt(c, v) for c, v in zip(season["index"], season["this_year"])],
+            "Average": [fmt(c, v) for c, v in zip(season["index"], season["average"])],
+            "Rank (1 = best)": [f"{r} of {n}" for r, n in zip(season["rank"], season["of"])]}),
+            use_container_width=True, hide_index=True)
+        pk, pkw = ovh.peak(vh, vy)
+        st.caption(f"Peak NDVI this season: {pk:.3f} in week {pkw}; last year {ovh.peak(vh, vy - 1)[0]:.3f}. Rank compares the same "
+                   f"window in every year since {season['years'].iloc[0][:4]}.")
+
+    yields = {int(y): v["yield_bu"] for y, v in on.load()["statcan"][crop].items() if "yield_bu" in v}
+    mod = ovh.yield_model(vh, crop, yields, latest)
+    if mod["predicted"] is not None:
+        ac_now = st_latest.get("harvested_ac") or 0.0
+        sat_kt = mod["predicted"] * ac_now / on.BU_PER_T[crop] / 1000.0
+        tour = next((e for e in ests if e["label"].startswith("Yield tour, calibrated")), None)
+        y1, y2, y3, y4 = st.columns(4)
+        y1.metric("Yield trend", f"{mod['trend_year']:.1f} bu/ac", delta_color="off")
+        y2.metric("Trend + satellite", f"{mod['predicted']:.1f} bu/ac", f"{sat_kt:,.0f} kt", delta_color="off", delta_arrow="off")
+        y3.metric("StatCan model", f"{st_latest.get('yield_bu', 0):.1f} bu/ac", f"{ests[0]['kt']:,.0f} kt", delta_color="off", delta_arrow="off")
+        if tour:
+            y4.metric("Yield tour (calibrated)", f"{tour['yield_bu']:.1f} bu/ac", f"{tour['kt']:,.0f} kt", delta_color="off", delta_arrow="off")
+        order = np.argsort(mod["x"])[::-1]
+        top, bottom = mod["anomaly"][order[:10]].mean(), mod["anomaly"][order[-10:]].mean()
+        rank_row = season[season["index"] == "SMN"].iloc[0] if not season.empty else None
+        st.markdown(
+            f"Using only the {vy} satellite reading and the yield trend, Ontario {noun} yield would be about **{mod['predicted']:.1f} "
+            f"bu/ac** (trend alone {mod['trend_year']:.1f}), which is {sat_kt:,.0f} kt on StatCan's harvested area. "
+            f"**The signal is weak:** over {mod['n']} past years the satellite term cuts the leave-one-out error from "
+            f"{mod['rmse_trend_loo']:.1f} to {mod['rmse_loo']:.1f} bu/ac ({mod['skill']:.0%} better), and the window was fixed in advance "
+            "rather than searched for the best fit. Years with a top-10 window finished "
+            f"{top:+.1f} bu/ac against trend on average, the 10 weakest {bottom:+.1f}. "
+            + (f"The {vy} window ranks {rank_row['rank']} of {rank_row['of']}: a good year, not a record, so the satellite does not "
+               "back a record-yield call." if rank_row is not None and rank_row["rank"] > 3 else ""))
+        st.button("Use the trend + satellite estimate in the balance below", on_click=_set_production, args=(crop, sat_kt),
+                  key=_k(crop, "use_sat"), help="Sets the latest crop in the assumptions to this figure.")
+        with st.expander("How the satellite reading maps to yield", expanded=False):
+            st.plotly_chart(of.vh_scatter(mod, noun.capitalize(), vy), use_container_width=True, key="on_vh_scatter",
+                            config={"displayModeBar": False})
+            st.caption(f"Each dot is a year: mean NDVI over weeks {wa}-{wb} against that year's StatCan yield minus the linear yield "
+                       "trend. NDVI saturates when crops are healthy, so it is better at flagging stress years than at ranking good ones.")
+    elif not season.empty:
+        st.info("The crop window has not finished yet, so there is no yield cross-check.")
 
     # ── what Ontario needs ────────────────────────────────────────────────────
     st.markdown('<div class="sh">What Ontario needs</div>', unsafe_allow_html=True)
@@ -314,6 +410,9 @@ def render(ny_soy_bu, ny_conv_bu, ny_year, price_usd: float, tariff: float, ny_g
             "update); farm stocks come from table 32-10-0007-01 (Dec 31, Mar 31 and Jul 31, farm stocks only, no commercial). "
             "The Great Ontario Yield Tour and the Farmtario trade estimate are typed in from published articles and will not "
             "update themselves.\n"
+            "- **Satellite series:** NOAA STAR Vegetation Health (province average over cropland pixels, weekly, 1982 to now; "
+            "fetched live, bundled copy as fallback). StatCan's public NDVI tables stopped (32-10-0453-01 archived at 2021-10-04; "
+            "32-10-0383-01 ends 2024-05-27), although StatCan's own September model still uses its CCAP series internally.\n"
             "- **Vintages differ:** OMAFRA's table lists 3,840 kt for the 2025 soybean crop; StatCan's current figure is "
             f"{on.production_kt('soy', 2025):,.0f} kt. This page uses StatCan for production and OMAFRA for use.\n"
             "- **County gap:** the soybean county rows stopped adding up after 2022; corn county rows tie to StatCan in every year. "
