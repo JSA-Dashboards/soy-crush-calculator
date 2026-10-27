@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import draw_ontario
 import dt_nass
 import ny_asd_data as nd
 import ny_asd_figs as nf
@@ -164,13 +165,16 @@ def render(sf_connect, sf_secret, dark: str, blue: str, zs_cents: float | None =
     USDA NASS production by ASD district and county, with estimates for counties NASS withholds, plus livestock inventory.
   </div>
 </div>""", unsafe_allow_html=True)
-    t_nass, t_ho, t_frt, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Freight & Spreads", "Livestock"])
+    t_nass, t_ho, t_frt, t_on, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Freight & Spreads", "Ontario",
+                                                 "Livestock"])
     with t_nass:
         _nass_tab()
     with t_ho:
         _ho_tab()
     with t_frt:
         _freight_tab()
+    with t_on:
+        _ontario_tab()
     with t_live:
         _livestock_tab()
 
@@ -912,6 +916,18 @@ def _freight_tab() -> None:
         wide.insert(0, "Best buyer", wn["short"])
         st.dataframe(wide.reset_index(), use_container_width=True, hide_index=True)
         st.caption("Cost in cents per bushel (haul + border + surtax) and road miles from the county centre point.")
+
+
+# ── Ontario: what it grows, uses and might need ───────────────────────────────
+def _ontario_tab() -> None:
+    try:
+        soy_bu, conv_bu, ny_year = _soy_bushels()
+        ny_total, ny_conv = float(sum(soy_bu.values())), float(sum(conv_bu.values()))
+    except Exception:
+        ny_total = ny_conv = ny_year = None
+    ss = st.session_state
+    draw_ontario.render(ny_total, ny_conv, ny_year, float(ss.get("ny_fr_price", _NOTES_PRICE)),
+                        float(ss.get("ny_fr_tariff", 0.25)), _geo())
 
 
 # ── livestock: Census county / ASD view, then the annual state survey ─────────
