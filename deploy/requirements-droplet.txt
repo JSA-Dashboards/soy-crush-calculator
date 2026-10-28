@@ -1,0 +1,4 @@
+# What the droplet's silage refresh needs (build_ny_silage.py imports ny_asd_data, which uses pandas and numpy). Not the app's
+# requirements.txt: the refresh must not pull in Streamlit or plotly.
+pandas>=2.2
+numpy>=1.26
