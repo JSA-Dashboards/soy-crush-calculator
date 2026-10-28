@@ -669,7 +669,7 @@ def _ho_tab() -> None:
         st.caption("No competition groups selected.")
     st.caption("Model weight = the assumed pull (0-3) of that node as high-oleic demand in the density model; no weight = "
                "not used. Out-of-state and export nodes are shown for context only. The map and this list show crushers, "
-               "roasters, elevators and feed mills; the roaster-equipment maker still feeds the density model but is not drawn. "
+               "roasters, elevators and feed mills. "
                "Planned and unconfirmed sites add no weight until they open (switch in Model settings).")
 
     with st.expander("County detail (model inputs and results)", expanded=False):

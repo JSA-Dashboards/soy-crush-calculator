@@ -18,7 +18,6 @@ CATEGORIES = {
     "commercial": {"label": "Commercial roaster", "color": "#dc2626", "symbol": "diamond", "size": 17},
     "onfarm":     {"label": "On-farm roaster", "color": "#ea580c", "symbol": "circle", "size": 15},
     "feedmill":   {"label": "Feed mill", "color": "#2563eb", "symbol": "square", "size": 15},
-    "equipment":  {"label": "Roaster equipment", "color": "#6b7280", "symbol": "triangle-up", "size": 15},
     "crush":      {"label": "Crusher / export terminal", "color": "#7c3aed", "symbol": "pentagon", "size": 18},
     "elevator":   {"label": "Competing elevator", "color": "#92400e", "symbol": "hexagon", "size": 14},
     "dealer":     {"label": "Licensed dealer (soybeans)", "color": "#0d9488", "symbol": "circle-open", "size": 13},
@@ -48,9 +47,6 @@ COMPETITORS = [
          prec="town", pull=3.0, note="Largest independent dairy mill in NY: >125,000 cows/day, >90 farms, 100+ ingredients."),
     dict(name="CNY Feeds - new Avon mill", cat="feedmill", town="Avon (William J. Bruckel Dr)", county="Livingston", lat=42.8666, lon=-77.7121,
          prec="address", pull=1.2, status="planned", note="Breaking ground; opens summer 2027. Dead centre in the western soybean belt."),
-    # Equipment channel
-    dict(name="A.N. Martin Systems (SoyRoaster)", cat="equipment", town="Clyde", county="Wayne", lat=43.0842, lon=-76.8694,
-         prec="town", pull=0.5, note="On-farm electric roasters, 3,000-20,000 lb/day. Not a bean buyer, but every unit sold is a farm that needs raw HO delivered."),
     # Crushers / export
     dict(name="York Milling & Grain", cat="crush", town="Livingston County (site not published)", county="Livingston", lat=42.7248, lon=-77.7796,
          prec="county", pull=1.0, status="unconfirmed",
@@ -110,7 +106,8 @@ ETHANOL_PLANTS = [
 ]
 
 # Which markers belong to which crop (Kolten, 2026-10-27): beans see crushers, roasters and elevators; corn sees elevators, feed mills
-# and ethanol plants. Roaster-equipment makers and licensed dealers are in neither list, and the Du Mond stars always draw.
+# and ethanol plants. Licensed dealers are in neither list, and the Du Mond stars always draw. (The roaster-equipment maker, A.N. Martin
+# Systems, was dropped from the registry altogether on 2026-10-27: not relevant.)
 # comp_label names the competition layer alone; label adds the ethanol plants, which have their own switch on the NASS tab.
 CROP_MARKERS = {
     "Soybeans": {"cats": ["commercial", "onfarm", "crush", "elevator"], "ethanol": False,
