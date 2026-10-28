@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import draw_ontario
+import draw_silage
 import dt_nass
 import ny_asd_data as nd
 import ny_asd_figs as nf
@@ -165,12 +166,14 @@ def render(sf_connect, sf_secret, dark: str, blue: str, zs_cents: float | None =
     USDA NASS production by ASD district and county, with estimates for counties NASS withholds, plus livestock inventory.
   </div>
 </div>""", unsafe_allow_html=True)
-    t_nass, t_ho, t_frt, t_on, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Freight & Spreads", "Ontario",
-                                                 "Livestock"])
+    t_nass, t_ho, t_sil, t_frt, t_on, t_live = st.tabs(["NASS Production", "High-Oleic & Competition", "Silage",
+                                                        "Freight & Spreads", "Ontario", "Livestock"])
     with t_nass:
         _nass_tab()
     with t_ho:
         _ho_tab()
+    with t_sil:
+        _silage_tab()
     with t_frt:
         _freight_tab()
     with t_on:
@@ -569,6 +572,13 @@ def _history_section(cobj, crop, year, metric, change, comp, adj, is_fc, fc_stat
                                        for v in tbl["Value"]],
                                  "Estimated": ["Est" if e else "" for e in tbl["is_estimated"]]})
             st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+# ── silage ────────────────────────────────────────────────────────────────────
+def _silage_tab() -> None:
+    cobj, err = _get_crop("Corn")
+    _source_note(err)
+    draw_silage.render(_geo(), cobj, _fips_map())
 
 
 # ── high-oleic density + competition ──────────────────────────────────────────

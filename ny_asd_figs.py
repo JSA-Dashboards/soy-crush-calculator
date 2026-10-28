@@ -61,6 +61,18 @@ def fmt_count(v):
     return "" if pd.isna(v) or v == 0 else f"{v:,.0f}"
 
 
+def fmt_ktons(v):
+    return "" if pd.isna(v) or v < 500 else f"{v / 1_000:,.0f}K"
+
+
+def fmt_t1(v):
+    return "" if pd.isna(v) or v == 0 else f"{v:.1f}"
+
+
+def fmt_pct0(v):
+    return "" if pd.isna(v) else f"{v:.0f}%"
+
+
 def auto_bu(mx: float) -> tuple:
     if mx >= 500e6:
         return 1e9, "B bu"
@@ -89,7 +101,21 @@ def view_cfg(metric: str, change_view: str) -> dict:
     ac = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_sfx": " ac", "label_unit": "K ac",
           "label_fn": fmt_acres, "rank_unit": "K ac", "rank_div": 1_000, "rank_fmt": ",.1f"}
     head = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_fn": fmt_count}
+    tons = {"cscale": SAGE_SEQ, "diverging": False, "hover_fmt": ":,.0f", "hover_sfx": " tons", "label_unit": "K tons",
+            "label_fn": fmt_ktons, "rank_unit": "K tons", "rank_div": 1_000, "rank_fmt": ",.1f"}
     return {
+        # Silage tab (corn for silage): see ny_silage.py
+        "Silage Acres": {**ac, "clabel": "Silage<br>acres"},
+        "Silage Production (tons)": {**tons, "clabel": "Silage<br>(tons)"},
+        "Silage Yield (tons/ac)": {"cscale": SAGE_SEQ, "diverging": False, "clabel": "Silage yield<br>(tons/ac)",
+                                   "hover_fmt": ":.1f", "hover_sfx": " tons/ac", "label_unit": "tons/ac", "label_fn": fmt_t1,
+                                   "rank_unit": "tons/ac", "rank_div": 1, "rank_fmt": ".1f"},
+        "Silage Share of Corn Acres": {"cscale": SAGE_SEQ, "diverging": False, "clabel": "Silage share<br>of corn (%)",
+                                       "hover_fmt": ":.0f", "hover_sfx": "% of corn acres", "label_unit": "% of corn acres",
+                                       "label_fn": fmt_pct0, "rank_unit": "%", "rank_div": 1, "rank_fmt": ".0f"},
+        "Grain Corn Production (bu)": {**bu, "clabel": "Grain corn<br>(bu)"},
+        "Milk Cows (Jan 2023)": {**head, "clabel": "Milk cows", "hover_sfx": " cows", "label_unit": "head",
+                                 "label_fn": fmt_head, "rank_unit": "K head", "rank_div": 1_000, "rank_fmt": ",.1f"},
         "Inventory (head)": {**head, "clabel": "Inventory<br>(head)", "hover_sfx": " head", "label_unit": "head",
                              "label_fn": fmt_head, "rank_unit": "K head", "rank_div": 1_000, "rank_fmt": ",.1f"},
         "Farms with Inventory": {**head, "clabel": "Farms with<br>inventory", "hover_sfx": " farms", "label_unit": "farms",
@@ -202,8 +228,9 @@ def frame_map(fig, geo: dict) -> None:
                     visible=False, bgcolor=DARK, landcolor=LAND, showframe=False, showlakes=False)
 
 
-def place_labels(fig, fips_list, values, centroids, label_fn, avoid=()):
-    """avoid = extra (lon, lat) marker points a label should keep clear of, on top of the facility stars."""
+def place_labels(fig, fips_list, values, centroids, label_fn, avoid=(), suffix=None):
+    """avoid = extra (lon, lat) marker points a label should keep clear of, on top of the facility stars. suffix = {fips: text}
+    appended to that county's label (an asterisk for an estimated county)."""
     areas = [centroids[f][2] for f in fips_list if f in centroids]
     if areas:
         avg_area = float(np.mean(areas))
@@ -215,7 +242,7 @@ def place_labels(fig, fips_list, values, centroids, label_fn, avoid=()):
         label = label_fn(val)
         if label and fips in centroids:
             cx, cy, area = centroids[fips]
-            cands.append((area, cx, cy, label))
+            cands.append((area, cx, cy, label + (suffix or {}).get(fips, "")))
     cands.sort(reverse=True)
     min_sep = float(np.clip(0.15 + avg_area * 0.8, 0.20, 0.45)) * 1.15
     placed, lons, lats, texts = [], [], [], []
@@ -304,9 +331,11 @@ def add_ethanol(fig) -> None:
 
 # ── maps ──────────────────────────────────────────────────────────────────────
 def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None,
-               src: str = "NASS", zrange: tuple | None = None, ethanol: bool = False, forecast: bool = False):
+               src: str = "NASS", zrange: tuple | None = None, ethanol: bool = False, forecast: bool = False,
+               label_est: bool = False):
     """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix. forecast = every county is
-    the state forecast split by average county shares (labelled as such in the title and subtitle, values still labelled)."""
+    the state forecast split by average county shares (labelled as such in the title and subtitle, values still labelled).
+    label_est = show an estimated county's value with an asterisk instead of the bare 'Est' (for maps where most are estimated)."""
     if df is None or df.empty:
         return None
     cfg = view_cfg(metric, change_view)
@@ -337,20 +366,22 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
     cents = geo["centroids"]
     eth = [(p["lon"], p["lat"]) for p in ny_ho.ETHANOL_PLANTS] if ethanol else ()     # keep county labels clear of the plants
     est_fips = [f for f in all_fips if est.get(f) and f in cents]
-    if est_fips:
+    if est_fips and not label_est:
         pts = [_repel(*_repel(cents[f][0], cents[f][1], 0.2), 0.3, eth) for f in est_fips]
         fig.add_trace(go.Scattergeo(lon=[p[0] for p in pts], lat=[p[1] for p in pts],
                                     mode="text", text=["Est"] * len(est_fips),
                                     textfont=dict(color="#374151", size=11, family="Arial Black"),
                                     showlegend=False, hoverinfo="skip"))
-    rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and not est.get(f)]
-    place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"], avoid=eth)
+    rep = [f for f in all_fips if val.get(f) is not None and not pd.isna(val.get(f)) and (label_est or not est.get(f))]
+    place_labels(fig, rep, [val[f] for f in rep], cents, cfg["label_fn"], avoid=eth,
+                 suffix={f: "*" for f in est_fips} if label_est else None)
     if competition:
         add_competition(fig, geo, competition)
     if ethanol:
         add_ethanol(fig)
     add_facilities(fig, "bottom" if competition else "tl")
-    sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
+    sub = f"Map labels in {cfg['label_unit']}" + (("  ·  * = county value estimated" if label_est else "  ·  Est = county value estimated")
+                                                  if est_fips else "")
     if forecast:
         sub += "  ·  forecast: each district's forecast split by average county shares"
     frame_map(fig, geo)
