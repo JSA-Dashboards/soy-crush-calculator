@@ -95,7 +95,7 @@ def _one_map(crop: str, crop_label: str, latest: int, p_latest: float, st_latest
         cc, _ = st.columns([0.7, 3])
         comp = cc.selectbox("Compare to Year", [y for y in years if y != year], key="on_pair_comp")
     d1, d2 = st.columns([1.5, 4.5])
-    view = d1.radio("Map view", ["County", "District"], horizontal=True, key="on_pair_view",
+    view = d1.radio("Map view", ["County", "District"], index=1, horizontal=True, key="on_pair_view",
                     help="District = OMAFRA's five regions for Ontario and the NASS ag districts for New York.")
     plants = d2.checkbox(f"Show plants and competitors for {crop_label.lower()} ({ny_ho.markers_for(crop_label)['label']}, Du Mond)",
                          value=True, key="on_pair_plants",

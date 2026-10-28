@@ -562,6 +562,19 @@ def _history_section(cobj, crop, year, metric, change, comp, adj, is_fc, fc_stat
 
 
 # ── high-oleic density + competition ──────────────────────────────────────────
+def _ho_inputs(cobj, year: int) -> tuple:
+    """(acres by fips, bushels by fips, is_forecast, yield) feeding the HO model. The forecast year has no NASS county data (county
+    estimates come after harvest), so NASS's state forecast is split by five-year county shares; the yield is the one the NASS
+    Production tab uses for the forecast (USDA's latest unless changed there)."""
+    if year == nd.FORECAST_YEAR and cobj.reported_counties(year) == 0:
+        src = cobj.default_yield_sources()
+        y_in = float(st.session_state.get("ny_fc_yield_Soybeans") or src["usda"] or src["ly"] or 0.0)
+        ac, bu = cobj.county_forecast(y_in)
+        return ac, bu, True, y_in
+    ac, pr = cobj.completed("harvested", year), cobj.completed("production", year)
+    return dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])), False, 0.0
+
+
 def _ho_tab() -> None:
     geo = _geo()
     cobj, err = _get_crop("Soybeans")
@@ -573,9 +586,12 @@ def _ho_tab() -> None:
         "This map shows where that blocked zone sits, who else is buying, and what is left to originate.</div>",
         unsafe_allow_html=True)
 
-    years = [y for y in nd.YEARS if y != nd.FORECAST_YEAR]
+    years = list(nd.YEARS)                                 # the forecast year first; the default is the latest actual year
     c1, c2, c3 = st.columns([1, 1.2, 3])
-    year = c1.selectbox("Soybean year", years, index=0, key="ny_ho_year")
+    year = c1.selectbox("Soybean year", years, index=1, key="ny_ho_year",
+                        format_func=lambda y: f"{y} (forecast)" if y == nd.FORECAST_YEAR and cobj.reported_counties(y) == 0 else str(y),
+                        help="The forecast year has no NASS county data yet, so NASS's state forecast is split across counties by "
+                             "their five-year average shares.")
     share = c2.number_input(
         "NY high-oleic share of soy acres (%)", min_value=0.0, max_value=100.0, value=ny_ho.STATE_HO_SHARE * 100,
         step=1.0, format="%.0f", key="ny_ho_share",
@@ -603,13 +619,19 @@ def _ho_tab() -> None:
         st.caption("This is a transparent proxy, not observed data: county-level HO trait data does not exist publicly. "
                    "Seed companies track variety placement by county and may share aggregates under NDA; that would replace this.")
 
-    ac = cobj.completed("harvested", year)
-    pr = cobj.completed("production", year)
-    if ac.empty:
+    acres_by, bu_by, is_fc, y_fc = _ho_inputs(cobj, year)
+    if not acres_by:
         st.warning(f"No county soybean data for {year}.")
         return
-    tbl = ny_ho.ho_table(geo, dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
-                         share / 100.0, float(radius), float(dairy_w), float(zone_w), include_pending, float(feed_scale))
+    ylab = f"{year} forecast" if is_fc else str(year)
+    if is_fc:
+        st.info(f"**{year} forecast.** NASS has no {year} county data (county estimates come after harvest), so New York's state "
+                f"forecast ({sum(acres_by.values()):,.0f} harvested acres at {y_fc:g} bu/ac) is split across counties by each county's "
+                "average share of the last five years. The county high-oleic shares are the model's, so this says nothing about where "
+                "high-oleic beans were actually planted. The yield is USDA's latest unless you change it on the NASS Production tab "
+                "(Soybeans, 2026).")
+    tbl = ny_ho.ho_table(geo, acres_by, bu_by, share / 100.0, float(radius), float(dairy_w), float(zone_w), include_pending,
+                         float(feed_scale))
     base = tbl[tbl["Soy acres"] > 0]
     tot_ac, ho_ac = base["Soy acres"].sum(), base["HO acres"].sum()
     conv_bu = base["Conv bu"].sum()
@@ -617,7 +639,7 @@ def _ho_tab() -> None:
     blocked_ac = base[base["Zone"] == "blocked"]["Soy acres"].sum()
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"{year} NY soybean acres", f"{tot_ac / 1e3:,.0f}K")
+    k1.metric(f"{ylab} NY soybean acres", f"{tot_ac / 1e3:,.0f}K")
     k2.metric("Est. high-oleic acres", f"{ho_ac / 1e3:,.0f}K", f"{ho_ac / tot_ac:.0%} of acres", delta_color="off", delta_arrow="off")
     k3.metric("Conventional pool", f"{conv_bu / 1e6:,.2f}M bu", f"{tot_ac - ho_ac:,.0f} acres", delta_color="off", delta_arrow="off")
     k4.metric("Outside blocked zone", f"{open_bu / 1e6:,.2f}M bu",
@@ -630,7 +652,7 @@ def _ho_tab() -> None:
     ho_cats = ny_ho.ho_marker_cats()                       # crushers, roasters, elevators and the feed mills the model uses; no corn markers
     cats = o2.multiselect("Show competition", ho_cats, default=ho_cats,
                           format_func=lambda k: ny_ho.CATEGORIES[k]["label"], key="ny_ho_cats")
-    fig = nf.ho_fig(tbl, geo, view, year, share / 100.0, cats, show_zones)
+    fig = nf.ho_fig(tbl, geo, view, ylab, share / 100.0, cats, show_zones)
     fig.update_layout(dragmode=False)
     st.plotly_chart(fig, use_container_width=True, key="ny_ho_map",
                     config={"scrollZoom": False, "displayModeBar": False, "doubleClick": False})
@@ -704,19 +726,21 @@ def _cd(v) -> str:
 
 
 def _soy_bushels() -> tuple:
-    """({fips: soybean bu}, {fips: conventional bu}, year): NASS soybeans with the High-Oleic tab's settings."""
+    """({fips: soybean bu}, {fips: conventional bu}, year label): NASS soybeans with the High-Oleic tab's settings. The label reads
+    "2026 forecast" when the HO tab is on the forecast year (counties split from NASS's state forecast)."""
     cobj, _err = _get_crop("Soybeans")
     ss = st.session_state
     years = [y for y in nd.YEARS if y != nd.FORECAST_YEAR]
     year = ss.get("ny_ho_year", years[0])
-    ac, pr = cobj.completed("harvested", year), cobj.completed("production", year)
-    if ac.empty:
-        return {}, {}, year
-    tbl = ny_ho.ho_table(_geo(), dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
+    acres_by, bu_by, is_fc, _y = _ho_inputs(cobj, year)
+    ylab = f"{year} forecast" if is_fc else str(year)
+    if not acres_by:
+        return {}, {}, ylab
+    tbl = ny_ho.ho_table(_geo(), acres_by, bu_by,
                          ss.get("ny_ho_share", ny_ho.STATE_HO_SHARE * 100) / 100.0, float(ss.get("ny_ho_radius", 35)),
                          float(ss.get("ny_ho_dairy", 0.3)), float(ss.get("ny_ho_zone", 0.5)),
                          bool(ss.get("ny_ho_pending", False)), float(ss.get("ny_ho_feed", 1.0)))
-    return (dict(zip(tbl["fips"], tbl["Soy bu"].fillna(0.0))), dict(zip(tbl["fips"], tbl["Conv bu"].fillna(0.0))), year)
+    return (dict(zip(tbl["fips"], tbl["Soy bu"].fillna(0.0))), dict(zip(tbl["fips"], tbl["Conv bu"].fillna(0.0))), ylab)
 
 
 def _freight_tab() -> None:

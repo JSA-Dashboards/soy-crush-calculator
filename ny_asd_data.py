@@ -456,6 +456,28 @@ class NYCrop:
                   "yield": yield_est or 0.0, "pct_harvested": st_hv / st_pl * 100 if st_pl else 0.0}
         return stats, totals
 
+    def county_forecast(self, yield_est: float, adj: Adj = Adj()) -> tuple:
+        """({fips: harvested acres}, {fips: production bu}) for FORECAST_YEAR. NASS has no county data for the current year, so the
+        state forecast is split by each county's olympic-average share of the last five years (reported plus estimated counties,
+        rescaled to add to 1), the way asd_forecast does it for districts. A forecast, not observed county data."""
+        hist = tuple(range(FORECAST_YEAR - 5, FORECAST_YEAR))
+        st_hv = self.forecast_state("harvested", adj) or 0.0
+        st_pr = yield_est * st_hv if (yield_est and st_hv) else 0.0
+
+        def shares(stat: str) -> dict:
+            yearly: dict = {}
+            for yr in hist:
+                cdf, st_val = self.completed(stat, yr, adj), self.state_total(stat, yr, adj)
+                if cdf.empty or not st_val or st_val <= 0:
+                    continue
+                for r in cdf.itertuples():
+                    yearly.setdefault(r.fips, []).append(float(r.Value) / st_val)
+            sh = {f: _olympic(v) for f, v in yearly.items() if v}
+            tot = sum(sh.values())
+            return {f: v / tot for f, v in sh.items()} if tot > 0 else {}
+        sa, sp = shares("harvested"), shares("production")
+        return ({f: st_hv * v for f, v in sa.items()} if st_hv else {}, {f: st_pr * v for f, v in sp.items()} if st_pr else {})
+
     # ── aggregation for the views ─────────────────────────────────────────────
     def district_series(self, stat: str, year: int, adj: Adj) -> tuple:
         """({district: value}, {district: any_estimated}) for one stat/year."""
