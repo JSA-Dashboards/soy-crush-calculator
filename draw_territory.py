@@ -593,6 +593,13 @@ def _ho_tab() -> None:
         zone_w = m3.slider("Weight your zone calls", 0.0, 1.0, 0.5, 0.05, key="ny_ho_zone",
                            help="0 = pure proximity + dairy model. 1 = your blocked / conventional-pool calls scale each "
                                 "county's score fully (blocked x1.0, partly blocked x0.85, pool x0.25, other x0.6).")
+        m4, m5, _m6 = st.columns(3)
+        feed_scale = m4.slider("Feed-mill weight (x the registry's)", 0.0, 1.5, 1.0, 0.1, key="ny_ho_feed",
+                               help="Scales the pull of the feed mills (CNY Feeds, registry weight 3.0). 1 = as listed, 0 = leave "
+                                    "the feed mills out of the model. The registry weights are assumptions, not data.")
+        include_pending = m5.checkbox("Count planned and unconfirmed sites", value=False, key="ny_ho_pending",
+                                      help="Off: a site that is planned or unconfirmed (the CNY Feeds Avon mill, opening summer "
+                                           "2027, and York Milling) adds no pull. Turn on to see the map once they run.")
         st.caption("This is a transparent proxy, not observed data: county-level HO trait data does not exist publicly. "
                    "Seed companies track variety placement by county and may share aggregates under NDA; that would replace this.")
 
@@ -602,7 +609,7 @@ def _ho_tab() -> None:
         st.warning(f"No county soybean data for {year}.")
         return
     tbl = ny_ho.ho_table(geo, dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
-                         share / 100.0, float(radius), float(dairy_w), float(zone_w))
+                         share / 100.0, float(radius), float(dairy_w), float(zone_w), include_pending, float(feed_scale))
     base = tbl[tbl["Soy acres"] > 0]
     tot_ac, ho_ac = base["Soy acres"].sum(), base["HO acres"].sum()
     conv_bu = base["Conv bu"].sum()
@@ -651,7 +658,9 @@ def _ho_tab() -> None:
             where = c["town"] + (f", {c['county']} Co." if c["county"] and "as listed" not in c["county"] else
                                  (f" ({c['county']})" if c["county"] else ""))
             tag = {"planned": " *(planned)*", "unconfirmed": " *(unconfirmed)*"}.get(c.get("status", ""), "")
-            wt = f" · model weight {c['pull']:g}" if c["pull"] else ""
+            eff = ny_ho.node_weight(c, include_pending, feed_scale)
+            wt = (f" · model weight {eff:g}" if eff else
+                  f" · weight {c['pull']:g}, not counted while {c['status']}" if c["pull"] and c.get("status") in ny_ho.PENDING else "")
             lines.append(f"- **{c['name']}**{tag} — {where} *({prec_txt[c['prec']]}{wt})*  \n  {c['note']}")
         st.markdown(f"<span style='color:{meta['color']};font-weight:700;'>● {meta['label']}</span>", unsafe_allow_html=True)
         st.markdown("\n".join(lines))
@@ -660,7 +669,8 @@ def _ho_tab() -> None:
         st.caption("No competition groups selected.")
     st.caption("Model weight = the assumed pull (0-3) of that node as high-oleic demand in the density model; no weight = "
                "not used. Out-of-state and export nodes are shown for context only. The map and this list show crushers, "
-               "roasters and elevators; feed mills and roaster-equipment makers still feed the density model but are not drawn.")
+               "roasters and elevators; feed mills and roaster-equipment makers still feed the density model but are not drawn. "
+               "Planned and unconfirmed sites add no weight until they open (switch in Model settings).")
 
     with st.expander("County detail (model inputs and results)", expanded=False):
         det = tbl[tbl["Soy acres"] > 0].sort_values("Conv bu", ascending=False)
@@ -704,7 +714,8 @@ def _soy_bushels() -> tuple:
         return {}, {}, year
     tbl = ny_ho.ho_table(_geo(), dict(zip(ac["fips"], ac["Value"])), dict(zip(pr["fips"], pr["Value"])),
                          ss.get("ny_ho_share", ny_ho.STATE_HO_SHARE * 100) / 100.0, float(ss.get("ny_ho_radius", 35)),
-                         float(ss.get("ny_ho_dairy", 0.3)), float(ss.get("ny_ho_zone", 0.5)))
+                         float(ss.get("ny_ho_dairy", 0.3)), float(ss.get("ny_ho_zone", 0.5)),
+                         bool(ss.get("ny_ho_pending", False)), float(ss.get("ny_ho_feed", 1.0)))
     return (dict(zip(tbl["fips"], tbl["Soy bu"].fillna(0.0))), dict(zip(tbl["fips"], tbl["Conv bu"].fillna(0.0))), year)
 
 

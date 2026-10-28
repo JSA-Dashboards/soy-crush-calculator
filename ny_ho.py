@@ -172,12 +172,24 @@ def haversine_mi(lon1, lat1, lon2, lat2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def roaster_pull(centroids: dict, radius_mi: float) -> dict:
+PENDING = ("planned", "unconfirmed")     # sites that are not running yet, or not confirmed to exist
+
+
+def node_weight(c: dict, include_pending: bool = False, feed_scale: float = 1.0) -> float:
+    """Pull a node actually adds to the density model: its assumed weight, scaled for feed mills, and zero for a planned or
+    unconfirmed site unless include_pending (a mill that opens in 2027 should not pull on 2025 acres)."""
+    if c.get("lat") is None or (c.get("status") in PENDING and not include_pending):
+        return 0.0
+    return float(c.get("pull", 0) or 0) * (feed_scale if c.get("cat") == "feedmill" else 1.0)
+
+
+def roaster_pull(centroids: dict, radius_mi: float, include_pending: bool = False, feed_scale: float = 1.0) -> dict:
     """{fips: index}: sum over HO demand nodes of pull x exp(-miles / radius) from each county centroid."""
-    nodes = [c for c in COMPETITORS if c.get("lat") is not None and c.get("pull", 0) > 0]
+    nodes = [(c, node_weight(c, include_pending, feed_scale)) for c in COMPETITORS]
+    nodes = [(c, w) for c, w in nodes if w > 0]
     out = {}
     for fips, (lon, lat, _area) in centroids.items():
-        out[fips] = sum(n["pull"] * math.exp(-haversine_mi(lon, lat, n["lon"], n["lat"]) / radius_mi) for n in nodes)
+        out[fips] = sum(w * math.exp(-haversine_mi(lon, lat, n["lon"], n["lat"]) / radius_mi) for n, w in nodes)
     return out
 
 
@@ -212,14 +224,16 @@ ZONE_PRIOR = {"blocked": 1.0, "partial": 0.85, "open": 0.25, "other": 0.6}
 
 
 def ho_table(geo: dict, acres_by_fips: dict, bu_by_fips: dict, state_share: float = STATE_HO_SHARE,
-             radius_mi: float = 35.0, dairy_weight: float = 0.3, zone_weight: float = 0.5) -> pd.DataFrame:
+             radius_mi: float = 35.0, dairy_weight: float = 0.3, zone_weight: float = 0.5,
+             include_pending: bool = False, feed_scale: float = 1.0) -> pd.DataFrame:
     """One row per county: soybean base, dairy, roaster pull, modeled HO share, HO / conventional acres and bushels.
     score = (1 - dairy_weight) x roaster pull + dairy_weight x dairy density, then scaled by your zone call:
-    x [(1 - zone_weight) + zone_weight x ZONE_PRIOR[zone]]."""
+    x [(1 - zone_weight) + zone_weight x ZONE_PRIOR[zone]]. Planned / unconfirmed sites add nothing unless include_pending;
+    feed_scale multiplies the feed mills' weights (0 = leave them out)."""
     look = fips_lookup(geo)
     names = {f["id"]: f["properties"]["NAME"] for f in geo["counties"]["features"]}
     cows = {look[norm(n)]: v for n, v in DAIRY_COWS.items() if norm(n) in look}
-    pull = roaster_pull(geo["centroids"], radius_mi)
+    pull = roaster_pull(geo["centroids"], radius_mi, include_pending, feed_scale)
     pmax = max(pull.values()) or 1.0
     cmax = max(cows.values()) or 1.0
     score = {f: ((1 - dairy_weight) * pull.get(f, 0.0) / pmax + dairy_weight * cows.get(f, 0.0) / cmax)
