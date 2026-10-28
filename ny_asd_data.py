@@ -456,27 +456,56 @@ class NYCrop:
                   "yield": yield_est or 0.0, "pct_harvested": st_hv / st_pl * 100 if st_pl else 0.0}
         return stats, totals
 
-    def county_forecast(self, yield_est: float, adj: Adj = Adj()) -> tuple:
-        """({fips: harvested acres}, {fips: production bu}) for FORECAST_YEAR. NASS has no county data for the current year, so the
-        state forecast is split by each county's olympic-average share of the last five years (reported plus estimated counties,
-        rescaled to add to 1), the way asd_forecast does it for districts. A forecast, not observed county data."""
+    def county_forecast(self, yield_est: float, adj: Adj = Adj()) -> dict:
+        """{stat: {fips: value}} for FORECAST_YEAR, stats planted / harvested / production / yield / pct_harvested. NASS has no
+        county data for the current year, so each district's forecast (asd_forecast) is split across its counties by their
+        olympic-average share of that district over the last five years (reported plus estimated counties, rescaled to add to
+        1 inside the district). Counties therefore add up to the district forecasts and the state forecast. A forecast, not
+        observed county data."""
         hist = tuple(range(FORECAST_YEAR - 5, FORECAST_YEAR))
-        st_hv = self.forecast_state("harvested", adj) or 0.0
-        st_pr = yield_est * st_hv if (yield_est and st_hv) else 0.0
-
-        def shares(stat: str) -> dict:
+        dstats, _totals = self.asd_forecast(yield_est, adj)
+        out: dict = {"planted": {}, "harvested": {}, "production": {}}
+        for stat in out:
             yearly: dict = {}
+            dist_of: dict = {}
             for yr in hist:
-                cdf, st_val = self.completed(stat, yr, adj), self.state_total(stat, yr, adj)
-                if cdf.empty or not st_val or st_val <= 0:
+                cdf = self.completed(stat, yr, adj)
+                if cdf.empty:
                     continue
+                dtot = cdf.groupby("District")["Value"].sum()
                 for r in cdf.itertuples():
-                    yearly.setdefault(r.fips, []).append(float(r.Value) / st_val)
+                    if r.District and dtot.get(r.District, 0) > 0:
+                        yearly.setdefault(r.fips, []).append(float(r.Value) / float(dtot[r.District]))
+                        dist_of[r.fips] = r.District
             sh = {f: _olympic(v) for f, v in yearly.items() if v}
-            tot = sum(sh.values())
-            return {f: v / tot for f, v in sh.items()} if tot > 0 else {}
-        sa, sp = shares("harvested"), shares("production")
-        return ({f: st_hv * v for f, v in sa.items()} if st_hv else {}, {f: st_pr * v for f, v in sp.items()} if st_pr else {})
+            dsum: dict = {}
+            for f, v in sh.items():
+                dsum[dist_of[f]] = dsum.get(dist_of[f], 0.0) + v
+            for f, v in sh.items():
+                dv = dstats.get(stat, {}).get(dist_of[f])
+                if dv is not None and dsum[dist_of[f]] > 0:
+                    out[stat][f] = dv * v / dsum[dist_of[f]]
+        hv, pl, pr = out["harvested"], out["planted"], out["production"]
+        out["pct_harvested"] = {f: hv[f] / pl[f] * 100 for f in hv if pl.get(f)}
+        if not adj.ts:                                     # production is total supply when adj.ts, so no yield then
+            out["yield"] = {f: pr[f] / hv[f] for f in pr if hv.get(f)}
+        else:
+            out["yield"] = {}
+        return out
+
+    def _county_names(self) -> dict:
+        def build():
+            d = self.df[(self.df["kind"] == "c") & ~self.df["ANSI"].isin(_BAD_ANSI)]
+            d = d[~d["County"].str.lower().str.startswith("other", na=False)]
+            return dict(zip(d["fips"], d["County"]))
+        return self._memoize(("county_names",), build)
+
+    def _forecast_frame(self, values: dict) -> pd.DataFrame:
+        """[fips, County, Value, District, DistrictCode] from a {fips: value} forecast."""
+        names, fm = self._county_names(), self.fips_map()
+        rows = [{"fips": f, "County": names.get(f, f), "Value": v, "District": fm.get(f, ("", ""))[0],
+                 "DistrictCode": fm.get(f, ("", ""))[1]} for f, v in values.items() if v is not None]
+        return pd.DataFrame(rows, columns=["fips", "County", "Value", "District", "DistrictCode"])
 
     # ── aggregation for the views ─────────────────────────────────────────────
     def district_series(self, stat: str, year: int, adj: Adj) -> tuple:
@@ -546,16 +575,19 @@ class NYCrop:
         mk = lambda d: pd.DataFrame(list(d.items()), columns=["District", "Value"]).dropna(subset=["Value"])
         return mk(view), mk(cur), {d for d, e in est.get(year, {}).items() if e}
 
-    def county_view(self, metric: str, year: int, change_view: str, comp_year, adj: Adj = Adj()) -> pd.DataFrame:
+    def county_view(self, metric: str, year: int, change_view: str, comp_year, adj: Adj = Adj(),
+                    fc_county: dict | None = None) -> pd.DataFrame:
         """[County, fips, Value, District, is_estimated] for the county map and ranking.
-        Current Year on an estimable stat uses completed (reported + estimated) counties."""
+        Current Year on an estimable stat uses completed (reported + estimated) counties. fc_county = county_forecast() output:
+        for FORECAST_YEAR it supplies the current values (is_estimated False so the map labels them; the figure flags the forecast)."""
         cols = ["County", "fips", "Value", "District", "DistrictCode", "is_estimated"]
         stat = METRIC_TO_STAT[metric]
-        if change_view == "Current Year" and stat in ESTIMABLE:
+        fc = (fc_county or {}).get(stat) if year == FORECAST_YEAR else None
+        if change_view == "Current Year" and stat in ESTIMABLE and not fc:
             c = self.completed(stat, year, adj)
             out = c if not c.empty else pd.DataFrame(columns=cols)
         else:
-            cur = self.named_county(stat, year, adj)
+            cur = self._forecast_frame(fc) if fc else self.named_county(stat, year, adj)
             if change_view == "Current Year" or cur.empty:
                 out = cur.assign(is_estimated=False)
             else:

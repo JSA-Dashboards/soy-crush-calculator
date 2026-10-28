@@ -304,8 +304,9 @@ def add_ethanol(fig) -> None:
 
 # ── maps ──────────────────────────────────────────────────────────────────────
 def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, change_view: str, competition=None,
-               src: str = "NASS", zrange: tuple | None = None, ethanol: bool = False):
-    """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix."""
+               src: str = "NASS", zrange: tuple | None = None, ethanol: bool = False, forecast: bool = False):
+    """df: [County, fips, Value, is_estimated]. Estimated counties get an 'Est' label and hover suffix. forecast = every county is
+    the state forecast split by average county shares (labelled as such in the title and subtitle, values still labelled)."""
     if df is None or df.empty:
         return None
     cfg = view_cfg(metric, change_view)
@@ -350,9 +351,11 @@ def county_fig(df: pd.DataFrame, geo: dict, crop: str, year: int, metric: str, c
         add_ethanol(fig)
     add_facilities(fig, "bottom" if competition else "tl")
     sub = f"Map labels in {cfg['label_unit']}" + ("  ·  Est = county value estimated" if est_fips else "")
+    if forecast:
+        sub += "  ·  forecast: each district's forecast split by average county shares"
     frame_map(fig, geo)
-    fig.update_layout(**_base_layout(f"{src} {year} {crop} — {view_label} | New York Counties<br><sup>{sub}</sup>",
-                                     18, 64),
+    fig.update_layout(**_base_layout(f"{src} {year}{' forecast' if forecast else ''} {crop} — {view_label} | New York Counties"
+                                     f"<br><sup>{sub}</sup>", 18, 64),
                       height=map_height(geo) + (90 if competition else 0))
     if competition:
         fig.update_layout(margin=dict(l=0, r=0, t=64, b=110))
