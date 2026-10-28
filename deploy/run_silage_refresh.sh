@@ -10,13 +10,14 @@
 #
 # NASS_API_KEY is read from /opt/usda-nass-etl/.env (one copy to rotate) into this process only, never into the repo or the log.
 # Everything is inside main() so a pull that rewrites this script mid-run cannot make bash execute half-old, half-new lines.
-# SILAGE_NO_PUSH=1 commits locally and skips the push (for testing).
+# Testing: SILAGE_NO_PUSH=1 commits locally and skips the push; SILAGE_REPO / SILAGE_PY / SILAGE_ENV_FILE point it at a scratch
+# clone (with a scratch "origin") so the commit-and-push path can be exercised without touching GitHub.
 set -euo pipefail
 
 main() {
-  local REPO=/opt/soy-crush-calculator
-  local PY="$REPO/.venv/bin/python"
-  local ENV_FILE=/opt/usda-nass-etl/.env
+  local REPO="${SILAGE_REPO:-/opt/soy-crush-calculator}"
+  local PY="${SILAGE_PY:-$REPO/.venv/bin/python}"
+  local ENV_FILE="${SILAGE_ENV_FILE:-/opt/usda-nass-etl/.env}"
   mkdir -p "$REPO/logs"
   exec >> "$REPO/logs/silage_refresh_$(date +%F).log" 2>&1
   echo "[$(date '+%F %T')] NY silage refresh"
