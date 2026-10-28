@@ -120,6 +120,12 @@ CROP_MARKERS = {
 }
 
 
+def ho_marker_cats() -> list:
+    """High-oleic tab: the soybean markers plus the feed mills the density model leans on (still no corn markers)."""
+    keep = set(CROP_MARKERS["Soybeans"]["cats"]) | {"feedmill"}
+    return [k for k in CATEGORIES if k in keep]
+
+
 def markers_for(crop_label: str) -> dict:
     """Competition categories (in legend order), whether the ethanol plants show, and the labels, for one crop."""
     m = CROP_MARKERS.get(crop_label, {"cats": [], "ethanol": False, "comp_label": "none for this crop", "label": "none for this crop"})

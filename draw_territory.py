@@ -627,7 +627,7 @@ def _ho_tab() -> None:
 
     o1, o2 = st.columns([2.2, 2.8])
     show_zones = o1.checkbox("Outline your blocked zone and conventional pool", value=True, key="ny_ho_zones")
-    ho_cats = ny_ho.markers_for("Soybeans")["cats"]        # soybeans only: crushers, roasters and elevators; no corn markers here
+    ho_cats = ny_ho.ho_marker_cats()                       # crushers, roasters, elevators and the feed mills the model uses; no corn markers
     cats = o2.multiselect("Show competition", ho_cats, default=ho_cats,
                           format_func=lambda k: ny_ho.CATEGORIES[k]["label"], key="ny_ho_cats")
     fig = nf.ho_fig(tbl, geo, view, year, share / 100.0, cats, show_zones)
@@ -669,7 +669,7 @@ def _ho_tab() -> None:
         st.caption("No competition groups selected.")
     st.caption("Model weight = the assumed pull (0-3) of that node as high-oleic demand in the density model; no weight = "
                "not used. Out-of-state and export nodes are shown for context only. The map and this list show crushers, "
-               "roasters and elevators; feed mills and roaster-equipment makers still feed the density model but are not drawn. "
+               "roasters, elevators and feed mills; the roaster-equipment maker still feeds the density model but is not drawn. "
                "Planned and unconfirmed sites add no weight until they open (switch in Model settings).")
 
     with st.expander("County detail (model inputs and results)", expanded=False):
