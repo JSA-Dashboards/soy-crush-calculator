@@ -157,9 +157,10 @@ def render(geo: dict, corn: nd.NYCrop, fips_map: dict | None = None) -> None:
     with st.expander("Data notes", expanded=False):
         st.markdown(
             "- **Source:** USDA NASS QuickStats, New York corn for silage (survey, not the Census of Agriculture): area harvested, "
-            "production in tons and yield, at state and county level, 2015 on. Data file built "
-            f"{meta.get('generated') or 'n/a'} by `build_ny_silage.py`; rebuild it after NASS's January state estimates and when county "
-            "estimates land (February-March). The Snowflake NASS cache only holds grain corn.\n"
+            "production in tons and yield, at state and county level, 2015 on. Data file last changed "
+            f"{meta.get('generated') or 'n/a'}. The JSA droplet re-checks NASS (`build_ny_silage.py`) daily in January-March, when the "
+            "state and then county silage estimates appear, and on Tuesdays the rest of the year, and commits the file only when "
+            "NASS's figures changed. The Snowflake NASS cache only holds grain corn.\n"
             "- **Grain and planted acres** come from the same corn data as the NASS tab (planted is all purposes).\n"
             "- **Withheld counties** are estimated the NASS tab's way. County estimates for the earliest year (2015) cannot be filled "
             "in because there is no earlier year to take shares from.\n"
